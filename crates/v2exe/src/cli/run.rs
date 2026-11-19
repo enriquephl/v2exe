@@ -1,4 +1,5 @@
-//! The non-interactive flow: settings, client, one subcommand, output.
+//! The non-interactive flow: settings, client, one subcommand, output. The interactive mode
+//! takes its settings and client from [`settings`] too.
 
 use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
@@ -6,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{FixedOffset, Local};
-use clap::CommandFactory;
 use v2ex_rs::{Client, ClientBuilder, Listing, Node};
 
 use super::args::{Cli, Command};
@@ -15,7 +15,7 @@ use super::output::{self, Painter};
 use super::topic_ref::parse_topic_ref;
 use crate::errors::message;
 use crate::render::sanitize;
-use crate::store::config::{self, Config, ConfigError};
+use crate::store::config::{self, Config, ConfigError, SegmentEdge};
 use crate::store::paths::Dirs;
 
 /// What the process environment decides: where the settings file is, whether to color and wrap
@@ -61,7 +61,7 @@ pub struct Failure {
 }
 
 impl Failure {
-    fn new(code: u8, message: impl Into<String>) -> Failure {
+    pub fn new(code: u8, message: impl Into<String>) -> Failure {
         Failure {
             code,
             message: message.into(),
@@ -74,21 +74,18 @@ impl Failure {
     }
 }
 
-/// Runs the subcommand and writes its output to `out`. A closed `out` ends the run quietly.
-pub async fn run(cli: Cli, out: &mut dyn Write, env: &RunEnv) -> Result<(), Failure> {
-    let Cli {
-        json,
-        no_color,
-        base_url,
-        proxy,
-        timeout,
-        command,
-    } = cli;
-    let Some(command) = command else {
-        let help = Cli::command().render_help();
-        return Err(Failure::new(2, format!("缺少子命令\n\n{help}")));
-    };
+/// What the settings file, the flags and the process environment decide, for either mode.
+pub struct Settings {
+    pub client: Client,
+    /// Off under `--no-color`, or when the environment turns colors off.
+    pub color: bool,
+    pub edge: SegmentEdge,
+}
 
+/// Reads the settings file and builds the client from it with the flags over its values. A file
+/// that cannot be used fails with code 1, and so does a bad `base_url` or `proxy` in it even
+/// when a flag overrides that value.
+pub fn settings(cli: &Cli, env: &RunEnv) -> Result<Settings, Failure> {
     let config = match &env.config_path {
         Some(path) => config::load(path).map_err(|e| Failure::new(1, e.to_string()))?,
         None => Config::default(),
@@ -101,18 +98,39 @@ pub async fn run(cli: Cli, out: &mut dyn Write, env: &RunEnv) -> Result<(), Fail
             .build()
             .map_err(|e| Failure::new(1, config_error(path, &e, &env.tz).to_string()))?;
     }
+    let client = client_builder(
+        cli.base_url.clone().or(config.base_url),
+        cli.proxy.clone().or(config.proxy),
+        cli.timeout.or(config.timeout),
+    )
+    .build()
+    .map_err(|e| Failure::from_error(&e, &env.tz))?;
+    Ok(Settings {
+        client,
+        color: env.color && !cli.no_color,
+        edge: config.segment_edge.unwrap_or_default(),
+    })
+}
+
+/// The topic id in a reference given on the command line; anything else is a usage error.
+pub fn topic_id(reference: &str) -> Result<u64, Failure> {
+    parse_topic_ref(reference)
+        .ok_or_else(|| Failure::new(2, format!("无法识别的帖子：{reference}")))
+}
+
+/// Runs `command` with the settings of `cli` and writes its output to `out`. A closed `out`
+/// ends the run quietly.
+pub async fn run(
+    command: Command,
+    cli: &Cli,
+    out: &mut dyn Write,
+    env: &RunEnv,
+) -> Result<(), Failure> {
+    let Settings { client, color, .. } = settings(cli, env)?;
     let session = Session {
-        client: client_builder(
-            base_url.or(config.base_url),
-            proxy.or(config.proxy),
-            timeout.or(config.timeout),
-        )
-        .build()
-        .map_err(|e| Failure::from_error(&e, &env.tz))?,
-        json,
-        painter: Painter {
-            color: env.color && !no_color,
-        },
+        client,
+        json: cli.json,
+        painter: Painter { color },
         env,
     };
 
@@ -185,8 +203,7 @@ impl Session<'_> {
     }
 
     async fn topic(&self, reference: &str, no_replies: bool) -> Result<String, Failure> {
-        let id = parse_topic_ref(reference)
-            .ok_or_else(|| Failure::new(2, format!("无法识别的帖子：{reference}")))?;
+        let id = topic_id(reference)?;
         let topic = self.client.topic(id).await.map_err(|e| self.failure(&e))?;
         let replies = if no_replies {
             None

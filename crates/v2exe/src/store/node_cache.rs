@@ -24,11 +24,13 @@ struct Loaded {
     nodes: Vec<Node>,
 }
 
-/// `None` when the file is missing, unreadable, or older than [`MAX_AGE`] at `now`.
+/// `None` when the file is missing, unreadable, older than [`MAX_AGE`] at `now`, or fetched
+/// after `now`, which a clock set back would give.
 pub fn load_nodes(path: &Path, now: DateTime<Utc>) -> Option<Vec<Node>> {
     let bytes = std::fs::read(path).ok()?;
     let loaded: Loaded = serde_json::from_slice(&bytes).ok()?;
-    (now - loaded.fetched <= MAX_AGE).then_some(loaded.nodes)
+    let age = now - loaded.fetched;
+    (age >= chrono::Duration::zero() && age <= MAX_AGE).then_some(loaded.nodes)
 }
 
 pub fn save_nodes(path: &Path, nodes: &[Node], now: DateTime<Utc>) -> io::Result<()> {
@@ -76,6 +78,20 @@ mod tests {
 
         std::fs::write(&path, "x").unwrap();
         assert_eq!(load_nodes(&path, t0), None);
+    }
+
+    #[test]
+    fn a_directory_exactly_max_age_old_is_fresh_and_one_from_the_future_is_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nodes.json");
+        let t0 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let nodes = vec![node(1, "python", "Python")];
+
+        save_nodes(&path, &nodes, t0).unwrap();
+
+        assert_eq!(load_nodes(&path, t0 + MAX_AGE), Some(nodes));
+        assert_eq!(load_nodes(&path, t0 + MAX_AGE + Duration::seconds(1)), None);
+        assert_eq!(load_nodes(&path, t0 - Duration::seconds(1)), None);
     }
 
     #[test]

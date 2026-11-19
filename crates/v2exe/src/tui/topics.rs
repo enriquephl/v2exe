@@ -11,6 +11,7 @@ use v2ex_rs::{Listing, Node, Topic};
 
 use super::app::{App, Cmd, Screen, ask_directory, hint, segment};
 use super::frame::{Chrome, Tone, draw_frame};
+use super::help::HelpScreen;
 use super::list::{ListNav, Nav};
 use super::prompt::{Prompt, PromptKey};
 use super::theme::{Paint, Theme};
@@ -237,7 +238,7 @@ impl App {
                 Vec::new()
             }
             Nav::Pass if key.code == KeyCode::Char('?') => {
-                self.stack.push(Screen::Help);
+                self.stack.push(Screen::Help(HelpScreen::default()));
                 Vec::new()
             }
             Nav::Pass => self.topics_command(key, page, now),

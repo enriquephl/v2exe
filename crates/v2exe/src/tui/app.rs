@@ -5,14 +5,14 @@
 use chrono::{DateTime, FixedOffset, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
-use ratatui::widgets::Paragraph;
 use v2ex_rs::{Listing, Node, RateLimit, Reply, Topic};
 
 use super::Start;
-use super::frame::{Chrome, Segment, Tone, draw_frame, draw_too_small, fits};
+use super::frame::{Segment, Tone, draw_too_small, fits};
+use super::help::{self, HelpScreen};
 use super::nodes::{self, NodesScreen, listing_name};
 use super::reader::{self, ReaderScreen};
-use super::theme::{Paint, Theme};
+use super::theme::Theme;
 use super::topics::{self, TopicsScreen};
 use crate::errors::message;
 use crate::store::config::SegmentEdge;
@@ -75,7 +75,7 @@ pub enum Screen {
     Nodes(NodesScreen),
     Topics(TopicsScreen),
     Reader(ReaderScreen),
-    Help,
+    Help(HelpScreen),
 }
 
 pub struct App {
@@ -140,8 +140,10 @@ impl App {
                 self.clamp_lists();
                 let (width, page) = (self.reader_width(), self.inner_height());
                 for screen in &mut self.stack {
-                    if let Screen::Reader(reader) = screen {
-                        reader.reflow(width, page, &self.tz);
+                    match screen {
+                        Screen::Reader(reader) => reader.reflow(width, page, &self.tz),
+                        Screen::Help(help) => help.clamp(width, page),
+                        Screen::Nodes(_) | Screen::Topics(_) => {}
                     }
                 }
                 Vec::new()
@@ -262,7 +264,8 @@ impl App {
         usize::from(self.size.1.saturating_sub(2))
     }
 
-    /// Columns for the reader's text: inside the border, with a column of space on each side.
+    /// Columns for the text of the reader and the help page: inside the border, with a column of
+    /// space on each side.
     pub(super) fn reader_width(&self) -> usize {
         usize::from(self.size.0.saturating_sub(4))
     }
@@ -321,11 +324,7 @@ impl App {
             Some(Screen::Nodes(_)) => return self.nodes_key(key),
             Some(Screen::Topics(_)) => return self.topics_key(key, now),
             Some(Screen::Reader(_)) => return self.reader_key(key, now),
-            Some(Screen::Help) => {
-                if let KeyCode::Left | KeyCode::Esc | KeyCode::Char('q' | 'h' | '?') = key.code {
-                    self.stack.pop();
-                }
-            }
+            Some(Screen::Help(_)) => self.help_key(key),
             None => {}
         }
         Vec::new()
@@ -345,7 +344,7 @@ impl App {
                     let len = topics.rows().len();
                     topics.nav.clamp(len, topics_page);
                 }
-                Screen::Reader(_) | Screen::Help => {}
+                Screen::Reader(_) | Screen::Help(_) => {}
             }
         }
     }
@@ -381,23 +380,11 @@ pub fn view(app: &App, theme: &Theme, edge: SegmentEdge, now: DateTime<Utc>, fra
         draw_too_small(frame, area);
         return;
     }
-    let chrome = |left, hints| Chrome {
-        left,
-        right: app.right_segments(now),
-        hints,
-        position: String::new(),
-    };
     match app.stack.last() {
         Some(Screen::Nodes(screen)) => nodes::draw(app, screen, theme, edge, now, frame),
         Some(Screen::Topics(screen)) => topics::draw(app, screen, theme, edge, now, frame),
         Some(Screen::Reader(screen)) => reader::draw(app, screen, theme, edge, now, frame),
-        Some(Screen::Help) => {
-            let left = vec![segment("V2EX", Tone::Site), segment("说明", Tone::Location)];
-            let hints = vec![hint("←", "返回")];
-            let inner = draw_frame(frame, area, &chrome(left, hints), theme, edge);
-            let body = Paragraph::new("← 返回   Ctrl-C 退出").style(theme.style(Paint::Plain));
-            frame.render_widget(body, inner);
-        }
+        Some(Screen::Help(screen)) => help::draw(app, screen, theme, edge, now, frame),
         None => {}
     }
 }
@@ -838,7 +825,7 @@ mod tests {
         assert!(code(&mut app, KeyCode::Char('?')).is_empty());
         assert!(matches!(
             app.stack.as_slice(),
-            [Screen::Nodes(_), Screen::Help]
+            [Screen::Nodes(_), Screen::Help(_)]
         ));
         code(&mut app, KeyCode::Char('q'));
         assert!(matches!(app.stack.as_slice(), [Screen::Nodes(_)]));
@@ -854,7 +841,7 @@ mod tests {
             code(&mut app, KeyCode::Char('j'));
             assert!(matches!(
                 app.stack.as_slice(),
-                [Screen::Nodes(_), Screen::Help]
+                [Screen::Nodes(_), Screen::Help(_)]
             ));
             code(&mut app, back);
             assert!(
@@ -869,7 +856,7 @@ mod tests {
     fn the_topic_list_and_the_reader_open_help_and_go_back() {
         let mut app = listing(Vec::new());
         code(&mut app, KeyCode::Char('?'));
-        assert!(matches!(app.stack.last(), Some(Screen::Help)));
+        assert!(matches!(app.stack.last(), Some(Screen::Help(_))));
         code(&mut app, KeyCode::Esc);
         code(&mut app, KeyCode::Char('j'));
         assert_eq!(app.stack.len(), 2);

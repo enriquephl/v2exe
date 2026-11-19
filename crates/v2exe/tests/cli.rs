@@ -318,17 +318,87 @@ async fn exit_codes_end_to_end() {
     );
 }
 
-#[tokio::test]
-async fn missing_subcommand_prints_help_and_exits_2() {
+/// Runs `v2exe <args>` with an empty config directory; the process has no terminal.
+fn run_bare(args: &[&str]) -> Output {
     let home = tempfile::tempdir().unwrap();
     let mut cmd = command(home.path());
-    cmd.arg("--json");
+    cmd.args(args);
+    finish(cmd)
+}
+
+#[tokio::test]
+async fn without_a_terminal_the_interactive_mode_exits_2_with_a_hint() {
+    for args in [&[][..], &["-i", "hot"], &["hot", "-i"]] {
+        let out = run_bare(args);
+
+        assert_eq!(out.code, 2, "{args:?}: {}", out.stderr);
+        assert_eq!(out.stdout, "", "{args:?}");
+        assert_eq!(
+            out.stderr, "v2exe: 互动式界面需要在终端里运行；非互动式用法见 v2exe --help\n",
+            "{args:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn interactive_rejects_json_and_a_bad_topic_reference() {
+    for args in [&["-i", "--json", "hot"][..], &["--json"]] {
+        let out = run_bare(args);
+        assert_eq!(out.code, 2, "{args:?}: {}", out.stderr);
+        assert_eq!(out.stdout, "", "{args:?}");
+        assert!(out.stderr.contains("--json"), "{args:?}: {}", out.stderr);
+        assert!(!out.stderr.contains("终端"), "{args:?}: {}", out.stderr);
+    }
+
+    let out = run_bare(&["-i", "topic", "abc"]);
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(out.stderr.contains("无法识别的帖子：abc"), "{}", out.stderr);
+    assert!(!out.stderr.contains("panicked"), "{}", out.stderr);
+}
+
+#[tokio::test]
+async fn the_interactive_mode_reads_the_settings_like_the_subcommands() {
+    let home = tempfile::tempdir().unwrap();
+    let config_dir = home.path().join("v2exe");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config = config_dir.join("config.toml");
+    std::fs::write(&config, "base_url = ").unwrap();
+    let mut cmd = command(home.path());
+    cmd.args(["-i", "hot"]);
+
+    let bad_file = finish(cmd);
+
+    assert_eq!(bad_file.code, 1, "{}", bad_file.stderr);
+    assert!(
+        bad_file.stderr.contains(&config.display().to_string()),
+        "{}",
+        bad_file.stderr
+    );
+    assert!(bad_file.stderr.contains("有误"), "{}", bad_file.stderr);
+
+    let bad_flag = run_bare(&["--proxy", "not a url"]);
+    assert_eq!(bad_flag.code, 2, "{}", bad_flag.stderr);
+    assert!(!bad_flag.stderr.contains("终端"), "{}", bad_flag.stderr);
+}
+
+#[tokio::test]
+async fn state_directories_that_cannot_be_used_do_not_stop_the_subcommands() {
+    let server = MockServer::start().await;
+    serve("/api/topics/hot.json", &[], TOPICS)
+        .mount(&server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    let not_a_dir = home.path().join("state");
+    std::fs::write(&not_a_dir, "a file, not a directory").unwrap();
+    let mut cmd = command(home.path());
+    cmd.env_remove("HOME")
+        .env("XDG_STATE_HOME", &not_a_dir)
+        .args(["--base-url", &server.uri(), "hot"]);
 
     let out = finish(cmd);
 
-    assert_eq!(out.code, 2);
-    assert_eq!(out.stdout, "");
-    assert!(out.stderr.contains("Usage"), "{}", out.stderr);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, hot_rows());
 }
 
 #[tokio::test]

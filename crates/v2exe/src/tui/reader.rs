@@ -11,6 +11,7 @@ use v2ex_rs::{Reply, Topic};
 
 use super::app::{App, Cmd, Screen, hint, segment};
 use super::frame::{Chrome, Tone, draw_frame};
+use super::help::HelpScreen;
 use super::prompt::{Prompt, PromptKey};
 use super::theme::{Paint, Theme};
 use super::topics::fit;
@@ -391,7 +392,7 @@ impl App {
                     return Vec::new();
                 }
                 '?' => {
-                    self.stack.push(Screen::Help);
+                    self.stack.push(Screen::Help(HelpScreen::default()));
                     return Vec::new();
                 }
                 _ => return Vec::new(),
