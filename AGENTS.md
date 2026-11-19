@@ -24,6 +24,7 @@
 | 路径 | 内容 |
 |---|---|
 | `docs/superpowers/` | spec 与 plan |
+| `docs/screenshots/` | README 的截图；生成方法见 `crates/v2exe/examples/screenshots.rs` 开头的说明 |
 | `crates/v2ex-rs/` | 数据层库：类型、来源、限流、缓存 |
 | `crates/v2exe/` | 程序：非互动式子命令、互动式界面、正文渲染、本地状态 |
 
