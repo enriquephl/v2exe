@@ -1407,6 +1407,39 @@ mod tests {
     }
 
     #[test]
+    fn space_goes_on_only_from_a_loaded_thread() {
+        let mut app = listing((1..=3).map(|i| topic(i, "示例", "alice", 1)).collect());
+        code(&mut app, KeyCode::Enter);
+        // Still loading: space does nothing.
+        for _ in 0..2 {
+            assert!(code(&mut app, KeyCode::Char(' ')).is_empty());
+            assert_eq!(reader_screen(&app).id, 1);
+            assert!(reader_screen(&app).pending.is_some());
+        }
+        assert_eq!(topics_screen(&app).nav.cursor, 0);
+
+        // Reloading a shown thread is loading too.
+        load_thread(&mut app, long_topic(1, 2), Vec::new());
+        code(&mut app, KeyCode::Char('r'));
+        assert!(code(&mut app, KeyCode::Char(' ')).is_empty());
+        assert_eq!(reader_screen(&app).id, 1);
+
+        load_thread(&mut app, long_topic(1, 2), Vec::new());
+        let cmds = code(&mut app, KeyCode::Char(' '));
+        assert_eq!(reader_screen(&app).id, 2);
+        assert!(matches!(cmds[0], Cmd::LoadThread { id: 2, .. }), "{cmds:?}");
+
+        // A first load that failed shows nothing to go on from; ] still goes on.
+        let ticket = reader_screen(&app).pending.unwrap();
+        let failed = Err(Error::Network("连接超时".into()));
+        app.update(thread_loaded(ticket, failed), now());
+        assert!(code(&mut app, KeyCode::Char(' ')).is_empty());
+        assert_eq!(reader_screen(&app).id, 2);
+        code(&mut app, KeyCode::Char(']'));
+        assert_eq!(reader_screen(&app).id, 3);
+    }
+
+    #[test]
     fn search_moves_between_matches_without_wrapping() {
         // Body lines 11, 31 and 51 are laid out as lines 13, 33 and 53.
         let mut t = topic(1, "示例", "alice", 0);

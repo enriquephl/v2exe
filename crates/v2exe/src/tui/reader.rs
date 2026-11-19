@@ -317,6 +317,9 @@ impl App {
         }
         let typed = std::mem::take(&mut screen.typed);
         let (scroll, last) = (screen.scroll, screen.max_scroll(page));
+        // Space goes on from the end of a shown thread only, so it never skips a topic that is
+        // still loading or failed to load.
+        let shown = screen.pending.is_none() && screen.topic.is_some();
         let target = match key.code {
             KeyCode::Enter => {
                 let line = typed
@@ -344,7 +347,7 @@ impl App {
             KeyCode::Char(c) if plain => match c {
                 'k' => scroll.saturating_sub(1),
                 'j' => scroll + 1,
-                ' ' if scroll == last => return self.walk(true, now),
+                ' ' if scroll == last && shown => return self.walk(true, now),
                 ' ' => scroll + page,
                 'g' => 0,
                 'G' => last,
