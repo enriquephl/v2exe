@@ -342,6 +342,22 @@ async fn node_lookup_and_not_found() {
 }
 
 #[tokio::test]
+async fn node_resolved_by_the_server_to_a_restricted_node_is_refused() {
+    let server = MockServer::start().await;
+    // The server trims whitespace and folds accents, so each of these names comes back as `nsfw`.
+    let canonical = NODE.replace(r#""name": "python""#, r#""name": "nsfw""#);
+    serve("/api/nodes/show.json", &[], &canonical)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+
+    for name in ["nsfw ", " nsfw", "nśfw"] {
+        let result = client.node(name).await;
+        assert!(matches!(result, Err(Error::Restricted { node }) if node == name));
+    }
+}
+
+#[tokio::test]
 async fn nodes_excludes_restricted() {
     let server = MockServer::start().await;
     serve("/api/nodes/all.json", &[], NODES)

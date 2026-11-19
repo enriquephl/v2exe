@@ -34,7 +34,9 @@ pub(crate) const RESTRICTED: &[RestrictedNode] = &[
     },
 ];
 
-/// Matches ignoring ASCII case: the API resolves node names case-insensitively.
+/// Matches ignoring ASCII case, which is the pre-check on a name before any request. The API
+/// also resolves other spellings (surrounding whitespace, accented letters) that no comparison
+/// here can enumerate, so a node fetched by name is checked again by the name in the response.
 pub(crate) fn by_name(name: &str) -> Option<&'static RestrictedNode> {
     RESTRICTED
         .iter()

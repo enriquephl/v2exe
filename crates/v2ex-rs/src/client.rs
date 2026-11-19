@@ -99,15 +99,20 @@ impl Client {
         })
     }
 
-    /// Fetches one node. A restricted node is refused with [`Error::Restricted`] without a
-    /// request.
+    /// Fetches one node. A restricted node is refused with [`Error::Restricted`]: by its name
+    /// without a request, or, when the server resolves some other spelling of the name to a
+    /// restricted node, by the name in the response.
     pub async fn node(&self, name: &str) -> Result<Node> {
         if restricted::by_name(name).is_some() {
             return Err(restricted_error(name));
         }
         let path = format!("/api/nodes/show.json?name={}", encode(name));
         let body = self.transport.get(&path, Endpoint::Api, NODE_TTL).await?;
-        api1::parse_node(&body)
+        let node = api1::parse_node(&body)?;
+        if restricted::by_name(&node.name).is_some() {
+            return Err(restricted_error(name));
+        }
+        Ok(node)
     }
 
     /// Fetches the node directory, without restricted nodes.
