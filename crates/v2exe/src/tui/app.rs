@@ -726,6 +726,20 @@ mod tests {
     }
 
     #[test]
+    fn a_long_error_is_cut_in_the_top_border_not_hidden() {
+        let (mut app, _) = launch(Start::Home);
+        app.error = Some(format!("网络错误：{}", "e".repeat(295)));
+        let buf = draw(&app, 80, 24);
+        assert_framed(&buf);
+        let top = row(&buf, 0);
+        assert!(
+            top.contains("✘ 网络错误：eeee") && top.contains("…"),
+            "{top}"
+        );
+        assert!(!top.contains("guest"), "{top}");
+    }
+
+    #[test]
     fn the_node_list_fills_the_height_and_keeps_its_border() {
         let (mut app, _) = launch(Start::Home);
         code(&mut app, KeyCode::Char('y'));

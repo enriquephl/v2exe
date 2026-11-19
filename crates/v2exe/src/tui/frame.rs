@@ -48,9 +48,10 @@ pub struct Chrome {
 pub const MIN_SIZE: (u16, u16) = (40, 8);
 
 /// Draws the border and returns the area inside it. Right-group segments are dropped from the
-/// last one until at least one border cell is left between the two groups, and hints from the
-/// last one until they fit beside the position; the left group and the position stay, cut at
-/// the corners if they alone are too wide.
+/// last one until at least one border cell is left between the two groups; the first one is
+/// instead cut, ending with `…`, while at least 8 cells are left for it. Hints are dropped from
+/// the last one until they fit beside the position. The left group and the position stay, cut
+/// at the corners if they alone are too wide.
 pub fn draw_frame(
     frame: &mut Frame,
     area: Rect,
@@ -162,23 +163,53 @@ fn width(spans: &[Span]) -> usize {
     spans.iter().map(Span::width).sum()
 }
 
+/// The fewest cells the first right-group segment is cut to before it is dropped.
+const MIN_CUT: usize = 8;
+
 /// Draws the groups on the top border row, never on the corner cells.
 fn draw_top(buf: &mut Buffer, area: Rect, chrome: &Chrome, theme: &Theme, edge: SegmentEdge) {
     let avail = usize::from(area.width - 2);
     let left = left_group(&chrome.left, theme, edge);
-    let right = right_group(&chrome.right, theme, edge);
-    let mut keep = right.len();
-    let mut right_width: usize = right.iter().map(|spans| width(spans)).sum();
-    // Kept segments leave at least one border cell before the right group.
-    while keep > 0 && left.width() + right_width >= avail {
-        keep -= 1;
-        right_width -= width(&right[keep]);
+    let mut right = right_group(&chrome.right, theme, edge);
+    // The right group leaves at least one border cell after the left group.
+    let room = avail.saturating_sub(left.width() + 1);
+    while right.len() > 1 && right.iter().map(|spans| width(spans)).sum::<usize>() > room {
+        right.pop();
     }
-    let right = Line::from(right[..keep].concat());
-    // What is kept fits beside the left group, so it is at most `avail`.
-    let right_width = right_width as u16;
+    if right.first().is_some_and(|first| width(first) > room) {
+        if room >= MIN_CUT {
+            right[0] = cut(&chrome.right[0], room, theme, edge);
+        } else {
+            right.clear();
+        }
+    }
+    let right = Line::from(right.concat());
+    // What is kept is at most `room`, so at most `avail`.
+    let right_width = right.width() as u16;
     buf.set_line(area.x + 1, area.y, &left, area.width - 2 - right_width);
     buf.set_line(area.right() - 1 - right_width, area.y, &right, right_width);
+}
+
+/// The first right-group segment with its text cut by display width so the segment is at most
+/// `room` cells wide, ending with `…`. `room` leaves space for the padding, an arrow and `…`.
+fn cut(seg: &Segment, room: usize, theme: &Theme, edge: SegmentEdge) -> Vec<Span<'static>> {
+    let ending_at = |text: &str| {
+        let seg = Segment {
+            text: format!("{text}…"),
+            tone: seg.tone,
+        };
+        right_group(&[seg], theme, edge).remove(0)
+    };
+    let text = sanitize(&seg.text);
+    // A cut to `room` cells never keeps more than `room` characters.
+    let mut end = text.char_indices().nth(room).map_or(text.len(), |(i, _)| i);
+    loop {
+        let spans = ending_at(&text[..end]);
+        if width(&spans) <= room || end == 0 {
+            return spans;
+        }
+        end = text[..end].char_indices().last().map_or(0, |(i, _)| i);
+    }
 }
 
 /// Draws the hints and the position on the bottom border row, never on the corner cells.
@@ -457,6 +488,71 @@ mod tests {
         c.right[1] = seg("bbbbbbbb", Tone::Identity);
         let (buf, _) = draw(40, 8, &c, true, SegmentEdge::Plain);
         assert_eq!(row(&buf, 0), format!("╭ V2EX {} {a} ╮", "─".repeat(10)));
+    }
+
+    /// A first right segment of 200 columns, then `guest`.
+    fn long_api_segment() -> Chrome {
+        let mut c = chrome();
+        c.right = vec![
+            seg(&format!("原因{}", "x".repeat(196)), Tone::Alert),
+            seg("guest", Tone::Identity),
+        ];
+        c
+    }
+
+    fn assert_corners(buf: &Buffer) {
+        let (w, h) = (buf.area.width, buf.area.height);
+        assert_eq!(buf[(0, 0)].symbol(), "╭");
+        assert_eq!(buf[(w - 1, 0)].symbol(), "╮");
+        assert_eq!(buf[(0, h - 1)].symbol(), "╰");
+        assert_eq!(buf[(w - 1, h - 1)].symbol(), "╯");
+        assert_eq!(row(buf, 0).width(), usize::from(w));
+    }
+
+    #[test]
+    fn a_long_first_right_segment_is_cut_instead_of_dropped() {
+        for edge in EDGES {
+            let (buf, _) = draw(80, 8, &long_api_segment(), true, edge);
+            assert_corners(&buf);
+            let top = row(&buf, 0);
+            assert!(top.contains("原因xxxx") && top.contains("…"), "{top}");
+            assert!(!top.contains("guest"), "{top}");
+            // One border cell after the left group, plain or after its last arrow.
+            assert!(
+                top.contains("+4 ~2 ─") || top.contains("+4 ~2 \u{e0b0}─"),
+                "{top}"
+            );
+            assert!(top.contains("V2EX") && top.contains("python"), "{top}");
+        }
+    }
+
+    #[test]
+    fn a_cut_segment_keeps_a_border_cell_and_needs_eight_cells() {
+        // The usual left group at width 40: cut with `…`, or absent.
+        for edge in EDGES {
+            let (buf, _) = draw(40, 8, &long_api_segment(), true, edge);
+            assert_corners(&buf);
+            let top = row(&buf, 0);
+            assert_eq!(top.contains("原因"), top.contains("…"), "{top}");
+            assert!(!top.contains("guest"), "{top}");
+            assert!(top.contains("V2EX") && top.contains("python"), "{top}");
+        }
+
+        // 8 cells left after the left group and one border cell: the segment is cut to fit.
+        let mut c = long_api_segment();
+        c.left.push(seg("abcdef", Tone::Status));
+        let (buf, _) = draw(40, 8, &c, true, SegmentEdge::Plain);
+        assert_corners(&buf);
+        assert_eq!(row(&buf, 0), "╭ V2EX  python  +4 ~2  abcdef ─ 原因x… ╮");
+
+        // 7 cells left: the segment is dropped.
+        c.left[3] = seg("abcdefg", Tone::Status);
+        let (buf, _) = draw(40, 8, &c, true, SegmentEdge::Plain);
+        assert_corners(&buf);
+        assert_eq!(
+            row(&buf, 0),
+            format!("╭ V2EX  python  +4 ~2  abcdefg {}╮", "─".repeat(8))
+        );
     }
 
     #[test]
