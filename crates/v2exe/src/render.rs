@@ -79,16 +79,22 @@ fn cell_widths(chars: impl Iterator<Item = char>) -> impl Iterator<Item = usize>
 }
 
 /// Whether `c` never reaches the terminal: a control character (C0, DEL, C1), or a
-/// bidirectional embedding, override or isolate control (U+202A–U+202E, U+2066–U+2069), which
-/// reorders the text around it on terminals that implement bidi.
+/// bidirectional control (the marks U+061C, U+200E and U+200F; the embeddings, overrides and
+/// isolates U+202A–U+202E and U+2066–U+2069), which reorders the text around it on terminals
+/// that implement bidi.
 fn is_dropped(c: char) -> bool {
-    c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        )
 }
 
 /// Drops control characters (C0, DEL, C1) and bidirectional controls, and expands tabs to the
-/// next multiple of 4 columns, counted from the start of `s`.
+/// next multiple of 4 columns, counted from the start of `s` as [`display_width`] counts them.
 pub fn sanitize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
+    // `display_width(&out)`, kept as `out` grows.
     let mut col = 0;
     for c in s.chars() {
         if c == '\t' {
@@ -96,6 +102,10 @@ pub fn sanitize(s: &str) -> String {
             out.extend(std::iter::repeat_n(' ', n));
             col += n;
         } else if !is_dropped(c) {
+            // The selector turns the one-column character before it into a two-column pair.
+            if c == EMOJI_PRESENTATION && out.chars().next_back().map(char_width) == Some(1) {
+                col += 1;
+            }
             out.push(c);
             col += char_width(c);
         }
