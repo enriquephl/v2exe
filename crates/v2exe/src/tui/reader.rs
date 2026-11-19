@@ -432,21 +432,21 @@ impl App {
 
     /// When a topic list is right under the reader on top, opens the topic after (`forward`) or
     /// before the reader's among the list's rows in place of the reader, and moves the list's
-    /// cursor to it. Nothing happens at either end of the rows or without such a list.
+    /// cursor to it. When the reader's topic is not among the rows (a reload dropped it), the
+    /// row at the cursor stands after it: forward opens that row, backward the one before it.
+    /// Nothing happens at either end of the rows or without such a list.
     fn walk(&mut self, forward: bool) -> Vec<Cmd> {
         let page = self.topics_page();
         let [.., Screen::Topics(list), Screen::Reader(reader)] = self.stack.as_mut_slice() else {
             return Vec::new();
         };
         let rows = list.rows();
-        let at = rows
-            .iter()
-            .position(|&(_, topic)| topic.id == reader.id)
-            .unwrap_or(list.nav.cursor);
-        let target = if forward {
-            Some(at + 1)
-        } else {
-            at.checked_sub(1)
+        let at = rows.iter().position(|&(_, topic)| topic.id == reader.id);
+        let target = match (at, forward) {
+            (Some(at), true) => Some(at + 1),
+            (Some(at), false) => at.checked_sub(1),
+            (None, true) => Some(list.nav.cursor),
+            (None, false) => list.nav.cursor.checked_sub(1),
         };
         let Some(target) = target else {
             return Vec::new();

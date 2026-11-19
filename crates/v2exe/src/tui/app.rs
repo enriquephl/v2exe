@@ -1435,6 +1435,40 @@ mod tests {
     }
 
     #[test]
+    fn bracket_keys_go_on_from_the_cursor_when_the_open_topic_left_the_list() {
+        // On the list of topics 1 to 4, the topic on row `row` is opened while a reload is on
+        // its way; the reload comes back as `reloaded`, without it.
+        let opened_then_reloaded = |row: usize, reloaded: &[u64]| {
+            let mut app = listing((1..=4).map(|i| topic(i, "示例", "alice", 1)).collect());
+            for _ in 0..row {
+                code(&mut app, KeyCode::Char('j'));
+            }
+            code(&mut app, KeyCode::Char('r'));
+            code(&mut app, KeyCode::Enter);
+            assert_eq!(reader_screen(&app).id, row as u64 + 1);
+            let topics = reloaded.iter().map(|&i| topic(i, "示例", "alice", 1));
+            load_topics(&mut app, topics.collect());
+            app
+        };
+        let opened = |app: &App| (reader_screen(app).id, topics_screen(app).nav.cursor);
+
+        // Topic 2 is gone and the cursor stays on row 1, now topic 3.
+        let mut app = opened_then_reloaded(1, &[1, 3, 4]);
+        code(&mut app, KeyCode::Char(']'));
+        assert_eq!(opened(&app), (3, 1));
+        let mut app = opened_then_reloaded(1, &[1, 3, 4]);
+        code(&mut app, KeyCode::Char('['));
+        assert_eq!(opened(&app), (1, 0));
+
+        // Topic 1 is gone and nothing is before the cursor's row.
+        let mut app = opened_then_reloaded(0, &[2, 3, 4]);
+        assert!(code(&mut app, KeyCode::Char('[')).is_empty());
+        assert_eq!(reader_screen(&app).id, 1);
+        code(&mut app, KeyCode::Char(']'));
+        assert_eq!(opened(&app), (2, 0));
+    }
+
+    #[test]
     fn space_goes_on_only_from_a_loaded_thread() {
         let mut app = listing((1..=3).map(|i| topic(i, "示例", "alice", 1)).collect());
         code(&mut app, KeyCode::Enter);
