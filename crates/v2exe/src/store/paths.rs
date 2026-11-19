@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Each directory already ends in the `v2exe` level; it is `None` when its XDG variable is not
 /// an absolute path and `HOME` is not one either.
@@ -35,19 +36,19 @@ impl Dirs {
 }
 
 /// Creates the parent directories, writes a temporary file next to `path`, then renames it
-/// to `path`.
-///
-/// At most one writer per target path per process at a time: the temporary file's name is
-/// per process.
+/// to `path`. The temporary file's name is unique to the call (process id and a counter), so
+/// writers of the same path never share one; the last rename wins.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    static CALLS: AtomicU64 = AtomicU64::new(0);
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
     let mut temp_name = name.to_os_string();
-    temp_name.push(format!(".tmp.{}", std::process::id()));
+    temp_name.push(format!(".tmp.{}.{call}", std::process::id()));
     let temp = path.with_file_name(temp_name);
     let written = std::fs::write(&temp, bytes).and_then(|()| std::fs::rename(&temp, path));
     if written.is_err() {
@@ -109,6 +110,32 @@ mod tests {
 
         assert_eq!(std::fs::read(&file).unwrap(), b"second, longer");
         let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, [OsString::from("file")]);
+    }
+
+    #[test]
+    fn concurrent_write_atomic_to_one_path_leaves_one_whole_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("file");
+        let contents = [vec![b'a'; 256 * 1024], vec![b'b'; 64 * 1024]];
+
+        std::thread::scope(|s| {
+            for bytes in &contents {
+                let (file, contents) = (&file, &contents);
+                s.spawn(move || {
+                    for _ in 0..100 {
+                        write_atomic(file, bytes).unwrap();
+                        assert!(contents.contains(&std::fs::read(file).unwrap()));
+                    }
+                });
+            }
+        });
+
+        assert!(contents.contains(&std::fs::read(&file).unwrap()));
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
