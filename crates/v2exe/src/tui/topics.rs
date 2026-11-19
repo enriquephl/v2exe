@@ -224,15 +224,10 @@ impl App {
                 }
                 Vec::new()
             }
-            Nav::Open => {
-                let Some((id, replies)) = screen.current().map(|t| (t.id, t.replies)) else {
-                    return Vec::new();
-                };
-                self.read.record(id, replies, now);
-                let mut cmds = self.open_topic(id);
-                cmds.push(Cmd::SaveRead);
-                cmds
-            }
+            Nav::Open => match screen.current().map(|t| (t.id, t.replies)) {
+                Some((id, replies)) => self.open_from_list(id, replies, now),
+                None => Vec::new(),
+            },
             Nav::Back => {
                 if screen.filter.is_some() || screen.author.is_some() {
                     screen.set_filters(None, None, page);
@@ -440,7 +435,7 @@ fn draw_rows(
     for (y, (i, &(_, topic))) in tops.zip(page) {
         let selected = i == screen.nav.cursor;
         let count = replies(topic.replies, theme);
-        // A reply count is at most 11 columns.
+        // A reply count is at most 3 columns.
         let count_width = (count.width() as u16).min(area.width);
         let mark = match app.read.mark(topic.id, topic.replies) {
             Mark::Unread => Span::styled("+ ", theme.style(Paint::Fresh)),
@@ -503,7 +498,7 @@ fn details(topic: &Topic, tz: &FixedOffset, theme: &Theme) -> Line<'static> {
 }
 
 /// `text` cut by display width to at most `width` columns, ending with `…` when cut.
-fn fit(text: &str, width: usize) -> String {
+pub(super) fn fit(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_string();
     }
@@ -518,6 +513,7 @@ fn fit(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
     use crossterm::event::KeyCode;
     use v2ex_rs::{Listing, Topic};
 
@@ -858,6 +854,19 @@ mod tests {
         code(&mut app, KeyCode::PageDown);
         assert_eq!(cursor(&app), 11);
         assert!(row(&draw(&app, 80, 24), 23).contains("12/50"));
+    }
+
+    #[test]
+    fn the_day_is_the_one_in_the_time_zone() {
+        // 20:00 UTC on 11/18 is 04:00 on 11/19 at UTC+8.
+        let mut late = topic(1, "示例", "alice", 0);
+        late.created = Utc.with_ymd_and_hms(2026, 11, 18, 20, 0, 0).unwrap();
+        let app = listing(vec![late]);
+        let second = row(&draw(&app, 80, 24), 2);
+        assert!(
+            second.contains("alice · 11/19") && !second.contains("11/18"),
+            "{second}"
+        );
     }
 
     #[test]
