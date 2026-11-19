@@ -3,6 +3,7 @@ use wiremock::matchers::{any, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TOPICS: &str = include_str!("fixtures/api1/topics.json");
+const TOPICS_GZ: &[u8] = include_bytes!("fixtures/api1/topics.json.gz");
 const TOPIC: &str = include_str!("fixtures/api1/topic.json");
 const TOPIC_RESTRICTED: &str = include_str!("fixtures/api1/topic_restricted.json");
 const REPLIES: &str = include_str!("fixtures/api1/replies.json");
@@ -437,4 +438,42 @@ async fn builder_overrides_user_agent() {
         .unwrap();
 
     client.topics(&Listing::Hot, 1).await.unwrap();
+}
+
+#[tokio::test]
+async fn socks5_proxy_is_supported() {
+    let closed_port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let client = Client::builder()
+        .base_url("http://127.0.0.1:9")
+        .proxy(format!("socks5://127.0.0.1:{closed_port}"))
+        .build()
+        .unwrap();
+
+    let result = client.topics(&Listing::Hot, 1).await;
+
+    assert!(
+        matches!(&result, Err(Error::Network(msg)) if !msg.contains("unsupported scheme")),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn gzip_responses_are_decoded() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/topics/hot.json"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-encoding", "gzip")
+                .set_body_bytes(TOPICS_GZ),
+        )
+        .mount(&server)
+        .await;
+
+    let p = client(&server).topics(&Listing::Hot, 1).await.unwrap();
+
+    assert_eq!(ids(&p.items), vec![1001, 1003]);
 }

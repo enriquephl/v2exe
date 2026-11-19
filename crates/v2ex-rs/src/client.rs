@@ -211,7 +211,8 @@ impl ClientBuilder {
         self
     }
 
-    /// Routes requests through this proxy. Without it the proxy environment variables apply.
+    /// Routes requests through this http, https or socks5 proxy. Without it the proxy
+    /// environment variables apply.
     pub fn proxy(mut self, url: impl Into<String>) -> Self {
         self.settings.proxy = Some(url.into());
         self
