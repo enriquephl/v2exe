@@ -162,13 +162,21 @@ impl Client {
                 } else {
                     (format!("/feed/tab/{}.xml", encode(tab)), FeedKind::Plain)
                 };
-                let (mut topics, fresh) = self
-                    .fetch_with_freshness(&path, Endpoint::Feed, TOPICS_TTL, |body| {
-                        parse_feed_body(body, &kind)
-                    })
-                    .await?;
-                let hidden = self.restricted_ids(fresh).await;
-                topics.retain(|t| !hidden.contains(&t.id));
+                // A fresh feed enters the cache only once the ids that go with it are kept, so a
+                // load dropped in between leaves nothing behind and the next one starts over. A
+                // cached feed reuses the kept ids without a request.
+                let mut topics = match self.transport.cached(&path) {
+                    Some(body) => parse_feed_body(&body, &kind)?,
+                    None => {
+                        let body = self.transport.request(&path, Endpoint::Feed).await?;
+                        let topics = parse_feed_body(&body, &kind)?;
+                        self.refetch_restricted_ids().await;
+                        self.transport.store(&path, body, TOPICS_TTL);
+                        topics
+                    }
+                };
+                let hidden = lock(&self.restricted_ids);
+                topics.retain(|t| !hidden.values().any(|ids| ids.contains(&t.id)));
                 topics
             }
             Listing::Node(name) => {
@@ -191,23 +199,15 @@ impl Client {
         Ok(topics)
     }
 
-    /// The kept ids of the recent topics of every restricted node. With `refresh` each source is
-    /// fetched first: a fetch that succeeds replaces its node's ids, and one that fails leaves
-    /// them as they were. A node with no ids yet adds none.
-    async fn restricted_ids(&self, refresh: bool) -> HashSet<u64> {
-        if refresh {
-            for node in restricted::RESTRICTED {
-                if let Ok(topics) = self.id_source_topics(node).await {
-                    let ids = topics.iter().map(|t| t.id).collect();
-                    lock(&self.restricted_ids).insert(node.name, ids);
-                }
+    /// Fetches the source of every restricted node: a fetch that succeeds replaces its node's
+    /// ids, and one that fails leaves them as they were.
+    async fn refetch_restricted_ids(&self) {
+        for node in restricted::RESTRICTED {
+            if let Ok(topics) = self.id_source_topics(node).await {
+                let ids = topics.iter().map(|t| t.id).collect();
+                lock(&self.restricted_ids).insert(node.name, ids);
             }
         }
-        lock(&self.restricted_ids)
-            .values()
-            .flatten()
-            .copied()
-            .collect()
     }
 
     /// The recent topics of a restricted node, fetched without the response cache.
@@ -252,24 +252,8 @@ impl Client {
         ttl: Duration,
         parse: impl FnOnce(&[u8]) -> Result<T>,
     ) -> Result<T> {
-        let (parsed, _) = self
-            .fetch_with_freshness(path, endpoint, ttl, parse)
-            .await?;
-        Ok(parsed)
-    }
-
-    /// Like [`Client::fetch`], and also tells whether this call sent the request, as opposed to
-    /// reading the body from the cache.
-    async fn fetch_with_freshness<T>(
-        &self,
-        path: &str,
-        endpoint: Endpoint,
-        ttl: Duration,
-        parse: impl FnOnce(&[u8]) -> Result<T>,
-    ) -> Result<(T, bool)> {
-        let fetched = self.transport.get(path, endpoint, ttl).await?;
-        let parsed = parse(&fetched.body).inspect_err(|_| self.transport.forget(path))?;
-        Ok((parsed, fetched.fresh))
+        let body = self.transport.get(path, endpoint, ttl).await?;
+        parse(&body).inspect_err(|_| self.transport.forget(path))
     }
 }
 

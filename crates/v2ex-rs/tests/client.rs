@@ -310,6 +310,45 @@ async fn concurrent_tab_loads_both_wait_for_the_restricted_ids() {
     assert_eq!(ids(&second.unwrap().items), vec![4002]);
 }
 
+#[tokio::test]
+async fn a_tab_load_dropped_before_its_restricted_ids_arrive_caches_nothing() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .expect(2)
+        .mount(&server)
+        .await;
+    serve(
+        "/api/topics/show.json",
+        &[("node_name", "flamewar")],
+        TOPICS,
+    )
+    .mount(&server)
+    .await;
+    // The nsfw feed lists topic 4001, which `TAB_FEED` also lists, and answers late.
+    Mock::given(method("GET"))
+        .and(path("/feed/nsfw.xml"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(NODE_FEED.replace("/t/2001#", "/t/4001#"))
+                .set_delay(Duration::from_millis(300)),
+        )
+        .mount(&server)
+        .await;
+    serve("/feed/sandbox.xml", &[], NODE_FEED)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+    let listing = Listing::Tab("all".into());
+
+    // Given up on while it waits for the nsfw feed.
+    let dropped =
+        tokio::time::timeout(Duration::from_millis(100), client.topics(&listing, 1)).await;
+    assert!(dropped.is_err());
+    let p = client.topics(&listing, 1).await.unwrap();
+
+    assert_eq!(ids(&p.items), vec![4002]);
+}
+
 /// Mounts the three restricted-node sources. The nsfw feed lists topic 4001, which `TAB_FEED`
 /// also lists; it answers once with that feed and then with `later`.
 async fn mount_restricted_sources_with_nsfw_then(server: &MockServer, later: ResponseTemplate) {

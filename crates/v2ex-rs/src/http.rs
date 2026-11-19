@@ -36,14 +36,6 @@ pub(crate) enum Endpoint {
     Feed,
 }
 
-/// A response body, and whether the call that returned it sent the request.
-#[derive(Debug)]
-pub(crate) struct Fetched {
-    pub body: Bytes,
-    /// False when the body came from the cache.
-    pub fresh: bool,
-}
-
 /// Clones share one connection pool, one cache and one quota record.
 #[derive(Clone)]
 pub(crate) struct Transport {
@@ -100,13 +92,13 @@ impl Transport {
 
     /// Fetches `path` (with its query string) from the base URL. A successful body is served
     /// from the cache for `ttl`; failures are never cached.
-    pub(crate) async fn get(&self, path: &str, kind: Endpoint, ttl: Duration) -> Result<Fetched> {
+    pub(crate) async fn get(&self, path: &str, kind: Endpoint, ttl: Duration) -> Result<Bytes> {
         if let Some(body) = self.cached(path) {
-            return Ok(Fetched { body, fresh: false });
+            return Ok(body);
         }
         let body = self.request(path, kind).await?;
         self.store(path, body.clone(), ttl);
-        Ok(Fetched { body, fresh: true })
+        Ok(body)
     }
 
     /// Fetches `path` without reading or writing the cache.
@@ -131,7 +123,7 @@ impl Transport {
 
     /// Caches `body` under `path` for `ttl`, replacing an earlier entry and dropping every entry
     /// that has expired.
-    fn store(&self, path: &str, body: Bytes, ttl: Duration) {
+    pub(crate) fn store(&self, path: &str, body: Bytes, ttl: Duration) {
         let now = Instant::now();
         let mut cache = lock(&self.inner.cache);
         cache.retain(|_, (expires, _)| *expires > now);
@@ -153,7 +145,7 @@ impl Transport {
     }
 
     /// The body cached under `path`, unless it has expired.
-    fn cached(&self, path: &str) -> Option<Bytes> {
+    pub(crate) fn cached(&self, path: &str) -> Option<Bytes> {
         let mut cache = lock(&self.inner.cache);
         match cache.get(path) {
             Some((expires, body)) if *expires > Instant::now() => Some(body.clone()),
@@ -308,8 +300,8 @@ mod tests {
         let first = t.get("/a", Endpoint::Feed, TTL).await.unwrap();
         let second = t.get("/a", Endpoint::Feed, TTL).await.unwrap();
 
-        assert_eq!(first.body, second.body);
-        assert_eq!(&first.body[..], b"hello");
+        assert_eq!(first, second);
+        assert_eq!(&first[..], b"hello");
     }
 
     #[tokio::test]
@@ -350,10 +342,7 @@ mod tests {
             t.get("/a", Endpoint::Feed, TTL).await,
             Err(Error::NotFound)
         ));
-        assert_eq!(
-            &t.get("/a", Endpoint::Feed, TTL).await.unwrap().body[..],
-            b"ok"
-        );
+        assert_eq!(&t.get("/a", Endpoint::Feed, TTL).await.unwrap()[..], b"ok");
     }
 
     #[tokio::test]
@@ -388,25 +377,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_is_true_only_when_a_request_was_sent() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/a"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("hello"))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let t = transport(&server);
-
-        let first = t.get("/a", Endpoint::Feed, TTL).await.unwrap();
-        let second = t.get("/a", Endpoint::Feed, TTL).await.unwrap();
-
-        assert!(first.fresh);
-        assert!(!second.fresh);
-        assert_eq!(first.body, second.body);
-    }
-
-    #[tokio::test]
     async fn request_bypasses_the_cache_and_leaves_its_entry() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -429,7 +399,7 @@ mod tests {
         let cached = t.get("/a", Endpoint::Feed, TTL).await.unwrap();
 
         assert_eq!(&requested[..], b"new");
-        assert_eq!((&cached.body[..], cached.fresh), (&b"old"[..], false));
+        assert_eq!(&cached[..], b"old");
     }
 
     #[tokio::test]
@@ -657,10 +627,7 @@ mod tests {
             .await;
         let t = transport(&server);
 
-        assert_eq!(
-            &t.get("/a", Endpoint::Feed, TTL).await.unwrap().body[..],
-            b"ok"
-        );
+        assert_eq!(&t.get("/a", Endpoint::Feed, TTL).await.unwrap()[..], b"ok");
     }
 
     #[tokio::test]
