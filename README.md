@@ -2,7 +2,7 @@
 
 以 PTT 为灵感、在终端里运行的 V2EX 阅读器。
 
-> 开发中，目前还不能用。下面写的是第一版要做到的样子。
+> 非互动式子命令已可用，互动式界面还在开发。下面写的是第一版要做到的样子。
 
 ## 截图
 
@@ -40,6 +40,10 @@ TODO: 节点列表、帖子列表、阅读页各一张。
 | `--limit <n>` | 列表最多输出 n 条 |
 | `--no-replies` | `topic` 只输出正文 |
 | `--no-color` | 关闭颜色 |
+| `--base-url <网址>` | 站点地址，默认 `https://www.v2ex.com` |
+| `--proxy <网址>` | 代理，支持 http、https、socks5；不指定时取环境变量 |
+| `--timeout <秒>` | 请求超时，默认 10 秒 |
+| `--version` | 输出版本号 |
 | `-i` | 不输出，改为打开界面并停在该位置 |
 
 ```bash
@@ -54,6 +58,24 @@ v2exe -i node python
 ```
 
 列表的每一行以帖子编号开头，可以直接接给 `v2exe topic`。
+
+## 配置
+
+`--base-url`、`--proxy`、`--timeout` 也可以写进配置文件 `$XDG_CONFIG_HOME/v2exe/config.toml`；未设 `XDG_CONFIG_HOME` 时是 `~/.config/v2exe/config.toml`，macOS 同样如此。键是 `base_url`、`proxy`、`timeout`，命令行选项优先。文件不存在就用默认值，v2exe 不会创建它。
+
+```toml
+base_url = "https://www.v2ex.com"
+proxy = "socks5://127.0.0.1:1080"
+timeout = 10
+```
+
+## 安装
+
+```bash
+cargo install --path crates/v2exe
+```
+
+需要 Rust 1.88 或更新的版本，以及一个 C 编译器（TLS 后端要编译 C 代码）。只支持 Linux 与 macOS，从源码安装。
 
 ## 参考项目
 

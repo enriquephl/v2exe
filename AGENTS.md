@@ -13,11 +13,19 @@
 
 新功能按「设计 → spec → plan → 实现」的顺序进行。spec 放 `docs/superpowers/specs/`，plan 放 `docs/superpowers/plans/`。用 superpowers skills（https://github.com/obra/superpowers）：先 brainstorming，再 writing-plans。
 
+## 分支与合并
+
+- 只有 `main` 一条长期分支，不设 `dev`；PR 都以 `main` 为目标。
+- 不直接 push 到 `main`，一切改动走 PR。
+- 每个 PR 先经 codex 审阅，再合并。
+
 ## 目录地图
 
 | 路径 | 内容 |
 |---|---|
 | `docs/superpowers/` | spec 与 plan |
+| `crates/v2ex-rs/` | 数据层库：类型、来源、限流、缓存 |
+| `crates/v2exe/` | 程序：非互动式子命令、互动式界面、正文渲染 |
 
 ## Engineering
 
