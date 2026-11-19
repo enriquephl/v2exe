@@ -1,0 +1,12 @@
+[package]
+name = "v2exe"
+version = "0.1.0"
+description = "Terminal V2EX reader"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+scraper = "0.29.0"
+unicode-width = "0.2.3"
+v2ex-rs = { path = "../v2ex-rs" }

@@ -19,6 +19,7 @@
 |---|---|
 | `docs/superpowers/` | spec 与 plan |
 | `crates/v2ex-rs/` | 数据层库：类型、来源、限流、缓存 |
+| `crates/v2exe/` | 程序：非互动式子命令、互动式界面、正文渲染 |
 
 ## Engineering
 
