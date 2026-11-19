@@ -1,6 +1,7 @@
 //! The one part of the interface that touches the outside world: it owns the terminal, turns
-//! its events into [`Msg`], and carries out every [`Cmd`]: requests in tasks of their own, file
-//! writes and the browser in place.
+//! its events into [`Msg`], and carries out every [`Cmd`]: requests in tasks of their own (the
+//! directory's task also writes `nodes.json`), the favorites and read-state saves and the
+//! browser in place.
 
 use std::future::Future;
 use std::io;
@@ -26,7 +27,7 @@ const TASK_PANICKED: &str = "后台任务意外中止";
 
 /// Runs the interface until the user quits. The terminal is in raw mode on the alternate screen
 /// meanwhile, and is restored before this returns and before a panic is reported. A panic in a
-/// background task ends the interface with an error.
+/// background task, or a read of the terminal that fails, ends the interface with an error.
 pub async fn run(client: Client, options: Options) -> io::Result<()> {
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
     let result = run_in(&mut terminal, client, options).await;
@@ -102,26 +103,38 @@ async fn run_in(
     Ok(())
 }
 
-/// Sends key presses and every new terminal size from a thread of its own, which blocks reading
-/// the terminal. The thread ends when the terminal cannot be read or the interface is gone.
+/// Reads the terminal in a thread of its own, which blocks on each read, and passes what it reads
+/// to [`forward`].
 fn forward_input(tx: UnboundedSender<io::Result<Msg>>) {
-    thread::spawn(move || {
-        while let Ok(event) = event::read() {
-            let msg = match event {
-                Event::Key(key) if key.kind == KeyEventKind::Press => Msg::Key(key),
-                Event::Resize(columns, rows) => Msg::Resize(columns, rows),
-                _ => continue,
-            };
-            if tx.send(Ok(msg)).is_err() {
-                break;
+    thread::spawn(move || forward(std::iter::repeat_with(event::read), tx));
+}
+
+/// Sends the key presses and every new terminal size among `events`, until the interface is
+/// gone. A read that fails is sent as the error that ends the loop, and ends the forwarding.
+fn forward(
+    events: impl IntoIterator<Item = io::Result<Event>>,
+    tx: UnboundedSender<io::Result<Msg>>,
+) {
+    for event in events {
+        let msg = match event {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => Msg::Key(key),
+            Ok(Event::Resize(columns, rows)) => Msg::Resize(columns, rows),
+            Ok(_) => continue,
+            Err(e) => {
+                let _ = tx.send(Err(e));
+                return;
             }
+        };
+        if tx.send(Ok(msg)).is_err() {
+            return;
         }
-    });
+    }
 }
 
 /// Carries out commands. A request runs in a task of its own and its result comes back as a
-/// message; a file write or the browser runs in place, and only a failure comes back. A task
-/// that panics comes back as an error, which ends the loop.
+/// message; the directory's task also writes `nodes.json`. Saving the favorites or the read
+/// state, and opening the browser, run in place, and only a failure comes back. A task that
+/// panics comes back as an error, which ends the loop.
 struct Runner {
     client: Client,
     tx: UnboundedSender<io::Result<Msg>>,
@@ -279,7 +292,9 @@ fn open_url(url: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc::UnboundedReceiver;
+    use tokio::sync::mpsc::error::TryRecvError;
     use v2ex_rs::Error;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -316,6 +331,58 @@ mod tests {
             nodes_path,
         };
         (runner, rx)
+    }
+
+    fn key(c: char, kind: KeyEventKind) -> io::Result<Event> {
+        Ok(Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char(c),
+            KeyModifiers::NONE,
+            kind,
+        )))
+    }
+
+    #[test]
+    fn input_forwards_key_presses_and_sizes_only() {
+        let (tx, mut rx) = unbounded_channel();
+
+        forward(
+            [
+                key('a', KeyEventKind::Press),
+                key('b', KeyEventKind::Release),
+                key('c', KeyEventKind::Repeat),
+                Ok(Event::FocusGained),
+                Ok(Event::Resize(100, 30)),
+            ],
+            tx,
+        );
+
+        let Ok(Ok(Msg::Key(pressed))) = rx.try_recv() else {
+            panic!("expected the key press");
+        };
+        assert_eq!(pressed.code, KeyCode::Char('a'));
+        assert!(matches!(rx.try_recv(), Ok(Ok(Msg::Resize(100, 30)))));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Disconnected)));
+    }
+
+    #[test]
+    fn a_read_error_is_forwarded_and_ends_the_input() {
+        let (tx, mut rx) = unbounded_channel();
+
+        forward(
+            [
+                key('a', KeyEventKind::Press),
+                Err(io::Error::other("示例：读不到终端")),
+                key('b', KeyEventKind::Press),
+            ],
+            tx,
+        );
+
+        assert!(matches!(rx.try_recv(), Ok(Ok(Msg::Key(_)))));
+        let Ok(Err(e)) = rx.try_recv() else {
+            panic!("expected the read error");
+        };
+        assert_eq!(e.to_string(), "示例：读不到终端");
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Disconnected)));
     }
 
     #[tokio::test]
