@@ -458,6 +458,38 @@ async fn failed_refetch_of_a_restricted_source_keeps_its_ids() {
 }
 
 #[tokio::test]
+async fn a_restricted_id_stays_known_after_its_source_stops_listing_it() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .expect(1)
+        .mount(&server)
+        .await;
+    serve("/feed/tab/tech.xml", &[], TAB_FEED)
+        .expect(1)
+        .mount(&server)
+        .await;
+    // Topic 4001 has rolled off the nsfw feed by the second request.
+    mount_restricted_sources_with_nsfw_then(
+        &server,
+        ResponseTemplate::new(200).set_body_string(NODE_FEED),
+    )
+    .await;
+    let client = client(&server);
+
+    let first = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+    let fresh = client
+        .topics(&Listing::Tab("tech".into()), 1)
+        .await
+        .unwrap();
+    // From the cache, still listing 4001.
+    let cached = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+
+    assert_eq!(ids(&first.items), vec![4002]);
+    assert_eq!(ids(&cached.items), vec![4002]);
+    assert_eq!(ids(&fresh.items), vec![4002]);
+}
+
+#[tokio::test]
 async fn unparseable_refetch_of_a_restricted_source_keeps_its_ids() {
     let server = MockServer::start().await;
     serve("/feed/tab/all.xml", &[], TAB_FEED)
@@ -478,9 +510,9 @@ async fn unparseable_refetch_of_a_restricted_source_keeps_its_ids() {
         .topics(&Listing::Tab("tech".into()), 1)
         .await
         .unwrap();
-    // This feed comes from the cache, so the ids are not fetched again: the ids that the bad
-    // body did not replace do the filtering. The nsfw feed is requested twice in total, once
-    // for `all` and once for the refresh behind `tech`.
+    // This feed comes from the cache, so the ids are not fetched again: the ids kept from the
+    // first nsfw feed do the filtering. The nsfw feed is requested twice in total, once for
+    // `all` and once for the refresh behind `tech`.
     let cached = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
 
     assert_eq!(ids(&fresh.items), vec![4002]);

@@ -1,6 +1,6 @@
 //! The public entry point: which source serves each call, and the restricted-node rules.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,10 +30,12 @@ const NAME_ESCAPES: &AsciiSet = &NON_ALPHANUMERIC
 #[derive(Clone)]
 pub struct Client {
     transport: Transport,
-    /// The recent topic ids of each restricted node, by name, from the last fetch of its source
-    /// that succeeded. Kept apart from the response cache: [`Client::clear_cache`] leaves them,
-    /// and they do not expire.
-    restricted_ids: Arc<Mutex<HashMap<&'static str, HashSet<u64>>>>,
+    /// Every topic id a restricted node's source has listed since the client was built: each
+    /// fetch of a source that succeeds adds its ids, and none is ever removed, so a feed cached
+    /// while a topic was recent is filtered after the topic leaves its node's recent list. Kept
+    /// apart from the response cache: [`Client::clear_cache`] leaves them, and they do not
+    /// expire.
+    restricted_ids: Arc<Mutex<HashSet<u64>>>,
     /// Held for the whole of a tab listing (feed, id refetch, filtering), so tab listings run
     /// one at a time and each filters with the ids that go with its feed.
     tab_turn: Arc<tokio::sync::Mutex<()>>,
@@ -176,7 +178,7 @@ impl Client {
                     }
                 };
                 let hidden = lock(&self.restricted_ids);
-                topics.retain(|t| !hidden.values().any(|ids| ids.contains(&t.id)));
+                topics.retain(|t| !hidden.contains(&t.id));
                 topics
             }
             Listing::Node(name) => {
@@ -199,13 +201,12 @@ impl Client {
         Ok(topics)
     }
 
-    /// Fetches the source of every restricted node: a fetch that succeeds replaces its node's
-    /// ids, and one that fails leaves them as they were.
+    /// Fetches the source of every restricted node: a fetch that succeeds adds its ids to the
+    /// kept ones, and one that fails adds none.
     async fn refetch_restricted_ids(&self) {
         for node in restricted::RESTRICTED {
             if let Ok(topics) = self.id_source_topics(node).await {
-                let ids = topics.iter().map(|t| t.id).collect();
-                lock(&self.restricted_ids).insert(node.name, ids);
+                lock(&self.restricted_ids).extend(topics.iter().map(|t| t.id));
             }
         }
     }
