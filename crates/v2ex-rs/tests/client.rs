@@ -608,7 +608,8 @@ async fn rate_limit_is_exposed() {
                 .set_body_string(TOPICS)
                 .insert_header("x-rate-limit-limit", "600")
                 .insert_header("x-rate-limit-remaining", "571")
-                .insert_header("x-rate-limit-reset", "1795060800"),
+                // 2100-01-01: a reset time that is still ahead.
+                .insert_header("x-rate-limit-reset", "4102444800"),
         )
         .mount(&server)
         .await;

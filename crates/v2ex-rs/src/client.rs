@@ -132,7 +132,8 @@ impl Client {
         Ok(nodes)
     }
 
-    /// The quota reported by the most recent API response.
+    /// The quota reported by the most recent API response whose reset time had not passed. A
+    /// copy served from the site's CDN carries the headers of the moment it was cached.
     pub fn rate_limit(&self) -> Option<RateLimit> {
         self.transport.rate_limit()
     }
