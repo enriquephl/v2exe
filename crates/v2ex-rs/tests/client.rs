@@ -259,7 +259,7 @@ async fn restricted_ids_are_refetched_with_each_fresh_tab_feed() {
     let client = client(&server);
 
     // The first two fetch their feed afresh; the third reads its feed from the cache and so
-    // reuses the cached ids.
+    // reuses the kept ids.
     client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
     client
         .topics(&Listing::Tab("tech".into()), 1)
@@ -299,7 +299,63 @@ async fn mount_restricted_sources_with_nsfw_then(server: &MockServer, later: Res
 }
 
 #[tokio::test]
-async fn failed_refetch_of_a_restricted_source_keeps_its_cached_ids() {
+async fn ids_kept_before_clear_cache_filter_while_the_nsfw_source_fails() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .expect(2)
+        .mount(&server)
+        .await;
+    mount_restricted_sources_with_nsfw_then(&server, ResponseTemplate::new(500)).await;
+    let client = client(&server);
+
+    let first = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+    client.clear_cache();
+    let second = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+
+    assert_eq!(ids(&first.items), vec![4002]);
+    assert_eq!(ids(&second.items), vec![4002]);
+}
+
+#[tokio::test]
+async fn ids_kept_before_clear_cache_filter_while_the_flamewar_source_is_rate_limited() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .expect(2)
+        .mount(&server)
+        .await;
+    // `TOPICS` lists topic 1002, which `TAB_FEED` also lists.
+    serve(
+        "/api/topics/show.json",
+        &[("node_name", "flamewar")],
+        TOPICS,
+    )
+    .up_to_n_times(1)
+    .expect(1)
+    .mount(&server)
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/api/topics/show.json"))
+        .and(query_param("node_name", "flamewar"))
+        .respond_with(ResponseTemplate::new(429))
+        .expect(1)
+        .mount(&server)
+        .await;
+    serve("/feed/nsfw.xml", &[], NODE_FEED).mount(&server).await;
+    serve("/feed/sandbox.xml", &[], NODE_FEED)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+
+    let first = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+    client.clear_cache();
+    let second = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+
+    assert_eq!(ids(&first.items), vec![4001, 4002]);
+    assert_eq!(ids(&second.items), vec![4001, 4002]);
+}
+
+#[tokio::test]
+async fn failed_refetch_of_a_restricted_source_keeps_its_ids() {
     let server = MockServer::start().await;
     serve("/feed/tab/all.xml", &[], TAB_FEED)
         .mount(&server)
@@ -321,7 +377,7 @@ async fn failed_refetch_of_a_restricted_source_keeps_its_cached_ids() {
 }
 
 #[tokio::test]
-async fn unparseable_refetch_of_a_restricted_source_keeps_the_cached_entry() {
+async fn unparseable_refetch_of_a_restricted_source_keeps_its_ids() {
     let server = MockServer::start().await;
     serve("/feed/tab/all.xml", &[], TAB_FEED)
         .mount(&server)
@@ -341,8 +397,8 @@ async fn unparseable_refetch_of_a_restricted_source_keeps_the_cached_entry() {
         .topics(&Listing::Tab("tech".into()), 1)
         .await
         .unwrap();
-    // This feed comes from the cache, so the ids are not fetched again: the entry that the bad
-    // body did not replace does the filtering. The nsfw feed is requested twice in total, once
+    // This feed comes from the cache, so the ids are not fetched again: the ids that the bad
+    // body did not replace do the filtering. The nsfw feed is requested twice in total, once
     // for `all` and once for the refresh behind `tech`.
     let cached = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
 

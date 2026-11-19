@@ -1,12 +1,13 @@
 //! The public entry point: which source serves each call, and the restricted-node rules.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, PercentEncode, utf8_percent_encode};
 
 use crate::feed::{self, FeedKind};
-use crate::http::{Endpoint, Settings, Transport};
+use crate::http::{Endpoint, Settings, Transport, lock};
 use crate::restricted::{self, IdSource, RestrictedNode};
 use crate::{Error, Listing, Node, Page, RateLimit, Reply, Result, Topic, api1};
 
@@ -17,7 +18,6 @@ const TOPICS_TTL: Duration = Duration::from_secs(120);
 const REPLIES_TTL: Duration = Duration::from_secs(60);
 const NODE_TTL: Duration = Duration::from_secs(3600);
 const NODES_TTL: Duration = Duration::from_secs(7200);
-const RESTRICTED_IDS_TTL: Duration = Duration::from_secs(600);
 
 const NAME_ESCAPES: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -25,10 +25,15 @@ const NAME_ESCAPES: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
-/// Cheap to clone; clones share one connection pool, cache and quota record.
+/// Cheap to clone; clones share one connection pool, cache, quota record and set of restricted
+/// ids.
 #[derive(Clone)]
 pub struct Client {
     transport: Transport,
+    /// The recent topic ids of each restricted node, by name, from the last fetch of its source
+    /// that succeeded. Kept apart from the response cache: [`Client::clear_cache`] leaves them,
+    /// and they do not expire.
+    restricted_ids: Arc<Mutex<HashMap<&'static str, HashSet<u64>>>>,
 }
 
 pub struct ClientBuilder {
@@ -132,7 +137,8 @@ impl Client {
         self.transport.rate_limit()
     }
 
-    /// Drops every cached response, so the next calls fetch afresh.
+    /// Drops every cached response, so the next calls fetch afresh. The ids kept for the
+    /// restricted nodes stay.
     pub fn clear_cache(&self) {
         self.transport.clear_cache();
     }
@@ -180,41 +186,38 @@ impl Client {
         Ok(topics)
     }
 
-    /// The ids of the recent topics of every restricted node. A source that fails is skipped.
-    /// With `refresh` each source is fetched afresh, and one whose fetch fails keeps its
-    /// unexpired cached ids; otherwise cached ids are reused.
+    /// The kept ids of the recent topics of every restricted node. With `refresh` each source is
+    /// fetched first: a fetch that succeeds replaces its node's ids, and one that fails leaves
+    /// them as they were. A node with no ids yet adds none.
     async fn restricted_ids(&self, refresh: bool) -> HashSet<u64> {
-        let mut ids = HashSet::new();
-        for node in restricted::RESTRICTED {
-            if let Ok(topics) = self.id_source_topics(node, refresh).await {
-                ids.extend(topics.iter().map(|t| t.id));
+        if refresh {
+            for node in restricted::RESTRICTED {
+                if let Ok(topics) = self.id_source_topics(node).await {
+                    let ids = topics.iter().map(|t| t.id).collect();
+                    lock(&self.restricted_ids).insert(node.name, ids);
+                }
             }
         }
-        ids
+        lock(&self.restricted_ids)
+            .values()
+            .flatten()
+            .copied()
+            .collect()
     }
 
-    async fn id_source_topics(&self, node: &RestrictedNode, refresh: bool) -> Result<Vec<Topic>> {
-        let path = id_source_path(node);
-        let (endpoint, kind) = match node.source {
-            IdSource::Api => (Endpoint::Api, None),
-            IdSource::Feed => (Endpoint::Feed, Some(FeedKind::Node(node.name.to_string()))),
-        };
-        let parse = |body: &[u8]| match &kind {
-            None => api1::parse_topics(body),
-            Some(kind) => parse_feed_body(body, kind),
-        };
-        if !refresh {
-            return self.fetch(&path, endpoint, RESTRICTED_IDS_TTL, parse).await;
-        }
-        match self
-            .refetch(&path, endpoint, RESTRICTED_IDS_TTL, parse)
-            .await
-        {
-            Err(e) => match self.transport.cached(&path) {
-                Some(body) => parse(&body),
-                None => Err(e),
-            },
-            topics => topics,
+    /// The recent topics of a restricted node, fetched without the response cache.
+    async fn id_source_topics(&self, node: &RestrictedNode) -> Result<Vec<Topic>> {
+        match node.source {
+            IdSource::Api => {
+                let path = format!("/api/topics/show.json?node_name={}", encode(node.name));
+                let body = self.transport.request(&path, Endpoint::Api).await?;
+                api1::parse_topics(&body)
+            }
+            IdSource::Feed => {
+                let path = node_feed_path(node.name);
+                let body = self.transport.request(&path, Endpoint::Feed).await?;
+                parse_feed_body(&body, &FeedKind::Node(node.name.to_string()))
+            }
         }
     }
 
@@ -263,22 +266,6 @@ impl Client {
         let parsed = parse(&fetched.body).inspect_err(|_| self.transport.forget(path))?;
         Ok((parsed, fetched.fresh))
     }
-
-    /// Fetches `path` and parses the body, ignoring what is cached. The body replaces the cached
-    /// one only once it parses, so a failed request or an unparseable body leaves the cached
-    /// entry as it was.
-    async fn refetch<T>(
-        &self,
-        path: &str,
-        endpoint: Endpoint,
-        ttl: Duration,
-        parse: impl FnOnce(&[u8]) -> Result<T>,
-    ) -> Result<T> {
-        let body = self.transport.request(path, endpoint).await?;
-        let parsed = parse(&body)?;
-        self.transport.store(path, body, ttl);
-        Ok(parsed)
-    }
 }
 
 impl ClientBuilder {
@@ -311,15 +298,8 @@ impl ClientBuilder {
     pub fn build(self) -> Result<Client> {
         Ok(Client {
             transport: Transport::new(&self.settings)?,
+            restricted_ids: Arc::default(),
         })
-    }
-}
-
-/// Where a restricted node's recent topic ids are fetched from.
-fn id_source_path(node: &RestrictedNode) -> String {
-    match node.source {
-        IdSource::Api => format!("/api/topics/show.json?node_name={}", encode(node.name)),
-        IdSource::Feed => node_feed_path(node.name),
     }
 }
 

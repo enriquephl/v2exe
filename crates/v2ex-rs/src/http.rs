@@ -109,8 +109,7 @@ impl Transport {
         Ok(Fetched { body, fresh: true })
     }
 
-    /// Fetches `path` without reading or writing the cache, so an entry already cached stays
-    /// as it is until the caller replaces it with [`Transport::store`].
+    /// Fetches `path` without reading or writing the cache.
     pub(crate) async fn request(&self, path: &str, kind: Endpoint) -> Result<Bytes> {
         if kind == Endpoint::Api {
             self.check_quota()?;
@@ -132,7 +131,7 @@ impl Transport {
 
     /// Caches `body` under `path` for `ttl`, replacing an earlier entry and dropping every entry
     /// that has expired.
-    pub(crate) fn store(&self, path: &str, body: Bytes, ttl: Duration) {
+    fn store(&self, path: &str, body: Bytes, ttl: Duration) {
         let now = Instant::now();
         let mut cache = lock(&self.inner.cache);
         cache.retain(|_, (expires, _)| *expires > now);
@@ -154,7 +153,7 @@ impl Transport {
     }
 
     /// The body cached under `path`, unless it has expired.
-    pub(crate) fn cached(&self, path: &str) -> Option<Bytes> {
+    fn cached(&self, path: &str) -> Option<Bytes> {
         let mut cache = lock(&self.inner.cache);
         match cache.get(path) {
             Some((expires, body)) if *expires > Instant::now() => Some(body.clone()),
@@ -221,7 +220,8 @@ impl Transport {
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+/// Locks `mutex`, ignoring poisoning.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
