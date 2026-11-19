@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Each directory already ends in the `v2exe` level; it is `None` when its XDG variable is not
-/// an absolute path and there is no `HOME`.
+/// an absolute path and `HOME` is not one either.
 pub struct Dirs {
     pub config: Option<PathBuf>,
     pub state: Option<PathBuf>,
@@ -14,10 +14,11 @@ pub struct Dirs {
 
 impl Dirs {
     pub fn from_env(var: impl Fn(&str) -> Option<OsString>) -> Dirs {
+        let absolute = |name: &str| var(name).map(PathBuf::from).filter(|p| p.is_absolute());
         let dir = |xdg: &str, under_home: &str| {
-            let base = match var(xdg).map(PathBuf::from).filter(|p| p.is_absolute()) {
+            let base = match absolute(xdg) {
                 Some(xdg) => xdg,
-                None => Path::new(&var("HOME")?).join(under_home),
+                None => absolute("HOME")?.join(under_home),
             };
             Some(base.join("v2exe"))
         };
@@ -35,6 +36,9 @@ impl Dirs {
 
 /// Creates the parent directories, writes a temporary file next to `path`, then renames it
 /// to `path`.
+///
+/// At most one writer per target path per process at a time: the temporary file's name is
+/// per process.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let name = path
         .file_name()
@@ -83,6 +87,14 @@ mod tests {
 
         let d = Dirs::from_env(env(&[]));
         assert!(d.config.is_none() && d.state.is_none() && d.cache.is_none());
+
+        let d = Dirs::from_env(env(&[("HOME", ""), ("XDG_CONFIG_HOME", "/c")]));
+        assert_eq!(d.config, Some("/c/v2exe".into()));
+        assert!(d.state.is_none() && d.cache.is_none());
+
+        let d = Dirs::from_env(env(&[("HOME", "relative"), ("XDG_CONFIG_HOME", "/c")]));
+        assert_eq!(d.config, Some("/c/v2exe".into()));
+        assert!(d.state.is_none() && d.cache.is_none());
     }
 
     #[test]
