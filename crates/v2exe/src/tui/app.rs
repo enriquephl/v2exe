@@ -1531,6 +1531,62 @@ mod tests {
         assert_eq!(scroll(&app), 53);
     }
 
+    fn current(app: &App) -> Option<usize> {
+        reader_screen(app).current
+    }
+
+    #[test]
+    fn search_steps_through_every_match_where_the_scroll_stops_short() {
+        // Body lines 28, 83 and 93 are laid out as lines 30, 85 and 95 of 100; a 22-row page
+        // stops scrolling at line 78.
+        let mut t = topic(1, "示例", "alice", 0);
+        let body: Vec<String> = (1..=97)
+            .map(|i| match i {
+                28 | 83 | 93 => format!("用 uv 的第{i}行"),
+                _ => format!("第{i}行"),
+            })
+            .collect();
+        t.content_html = Some(body.join("<br>"));
+        let mut app = reading(t, Vec::new());
+        assert_eq!((line_count(&app), app.inner_height()), (100, 22));
+
+        chars(&mut app, "/uv");
+        code(&mut app, KeyCode::Enter);
+        assert_eq!((current(&app), scroll(&app)), (Some(30), 30));
+        for (key, expected) in [
+            (plain(KeyCode::Char('n')), (Some(85), 78)),
+            (plain(KeyCode::Char('n')), (Some(95), 78)),
+            (plain(KeyCode::Char('n')), (Some(95), 78)),
+            (shift('N'), (Some(85), 78)),
+            (shift('N'), (Some(30), 30)),
+        ] {
+            press(&mut app, key);
+            assert_eq!((current(&app), scroll(&app)), expected, "{key:?}");
+        }
+
+        // Once the current match is off the page, n and N go on from the page's top line.
+        chars(&mut app, "nn");
+        assert_eq!(current(&app), Some(95));
+        code(&mut app, KeyCode::Home);
+        chars(&mut app, "n");
+        assert_eq!((current(&app), scroll(&app)), (Some(30), 30));
+
+        // A resize that keeps the layout keeps the current match; one that changes it drops it.
+        app.update(Msg::Resize(80, 30), now());
+        assert_eq!(current(&app), Some(30));
+        app.update(Msg::Resize(20, 24), now());
+        assert_eq!(current(&app), None);
+        app.update(Msg::Resize(80, 24), now());
+        chars(&mut app, "n");
+        assert_eq!(current(&app), Some(85));
+
+        // A new search starts from the top line of the page.
+        code(&mut app, KeyCode::Home);
+        chars(&mut app, "/第93");
+        code(&mut app, KeyCode::Enter);
+        assert_eq!(current(&app), Some(95));
+    }
+
     #[test]
     fn resize_reflows_and_keeps_scroll_in_range() {
         // Each body line is 90 columns: two lines at 76 columns, one at 100.

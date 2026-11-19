@@ -213,6 +213,9 @@ pub struct ReaderScreen {
     pub prompt: Option<Prompt>,
     /// The text searched for, ignoring case.
     pub search: Option<String>,
+    /// The line of the match the search last went to, kept apart from `scroll`, which stops
+    /// short of a match near the end.
+    pub current: Option<usize>,
 }
 
 impl ReaderScreen {
@@ -228,14 +231,20 @@ impl ReaderScreen {
             typed: String::new(),
             prompt: None,
             search: None,
+            current: None,
         }
     }
 
     /// Lays the topic out again for `width` columns, once it has arrived, and keeps `scroll`
-    /// in range for a page of `page` rows.
+    /// in range for a page of `page` rows. A layout that comes out different drops the current
+    /// match: its line numbers name other lines.
     pub(super) fn reflow(&mut self, width: usize, page: usize, tz: &FixedOffset) {
         if let Some(topic) = &self.topic {
-            self.layout = layout(topic, &self.replies, width, tz);
+            let laid = layout(topic, &self.replies, width, tz);
+            if laid != self.layout {
+                self.current = None;
+            }
+            self.layout = laid;
         }
         self.scroll_to(self.scroll, page);
     }
@@ -264,8 +273,9 @@ impl ReaderScreen {
             .collect()
     }
 
-    /// A key while the search is typed. `Enter` searches from the top of the page down (an
-    /// empty text is no search); `Esc` and `←` keep the search there was.
+    /// A key while the search is typed. `Enter` searches from the top of the page down and makes
+    /// the first match there the current one (an empty text is no search); `Esc` and `←` keep
+    /// the search there was.
     fn search_key(&mut self, key: KeyEvent, page: usize) {
         let Some(prompt) = &mut self.prompt else {
             return;
@@ -277,10 +287,28 @@ impl ReaderScreen {
                 let text = std::mem::take(&mut prompt.text);
                 self.prompt = None;
                 self.search = Some(text).filter(|text| !text.is_empty());
-                if let Some(line) = self.matches().into_iter().find(|&i| i >= self.scroll) {
+                self.current = self.matches().into_iter().find(|&i| i >= self.scroll);
+                if let Some(line) = self.current {
                     self.scroll_to(line, page);
                 }
             }
+        }
+    }
+
+    /// The match `n` (`forward`) or `N` goes to, without wrapping: the next or the previous one
+    /// from the current match while it is on the page, and from the top line of the page
+    /// otherwise.
+    fn step_match(&self, forward: bool, page: usize) -> Option<usize> {
+        let shown = self.scroll..self.scroll + page;
+        let from = self
+            .current
+            .filter(|line| shown.contains(line))
+            .unwrap_or(self.scroll);
+        let mut matches = self.matches().into_iter();
+        if forward {
+            matches.find(|&i| i > from)
+        } else {
+            matches.rev().find(|&i| i < from)
         }
     }
 
@@ -352,12 +380,11 @@ impl App {
                 ' ' => scroll + page,
                 'g' => 0,
                 'G' => last,
-                'n' => match screen.matches().into_iter().find(|&i| i > scroll) {
-                    Some(line) => line,
-                    None => return Vec::new(),
-                },
-                'N' => match screen.matches().into_iter().rev().find(|&i| i < scroll) {
-                    Some(line) => line,
+                'n' | 'N' => match screen.step_match(c == 'n', page) {
+                    Some(line) => {
+                        screen.current = Some(line);
+                        line
+                    }
                     None => return Vec::new(),
                 },
                 '/' => {
