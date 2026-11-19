@@ -6,7 +6,7 @@ use v2ex_rs::Error;
 /// Chinese message for `e`; a rate-limit reset time is shown in `tz`.
 pub fn message(e: &Error, tz: &FixedOffset) -> String {
     match e {
-        Error::NotFound => "找不到这个帖子或节点".to_string(),
+        Error::NotFound => "找不到这个帖子、节点或 tab".to_string(),
         Error::RateLimited { reset: Some(t) } => {
             format!(
                 "接口额度已用完，{} 恢复",

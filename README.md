@@ -6,7 +6,28 @@
 
 ## 截图
 
-TODO: 节点列表、帖子列表、阅读页各一张。
+节点列表：
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/nodes-dark.png">
+  <img alt="节点列表：我的最爱" src="docs/screenshots/nodes-light.png">
+</picture>
+
+帖子列表：
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/topics-dark.png">
+  <img alt="帖子列表：每个帖子两行，带未读标记与回复数" src="docs/screenshots/topics-light.png">
+</picture>
+
+阅读页：
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/reader-dark.png">
+  <img alt="阅读页：正文之后每则回复一块" src="docs/screenshots/reader-light.png">
+</picture>
+
+图里的内容是示例。颜色跟随终端配色，实际观感以你的终端为准。
 
 ## 特性
 
