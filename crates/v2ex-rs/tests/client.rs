@@ -114,6 +114,19 @@ async fn restricted_node_listing_is_refused_without_request() {
 }
 
 #[tokio::test]
+async fn node_listing_whose_feed_resolves_to_a_restricted_node_is_refused() {
+    let server = MockServer::start().await;
+    let feed = NODE_FEED.replace("<title>Python</title>", "<title>NSFW</title>");
+    serve("/feed/alias-x.xml", &[], &feed).mount(&server).await;
+
+    let result = client(&server)
+        .topics(&Listing::Node("alias-x".into()), 1)
+        .await;
+
+    assert!(matches!(result, Err(Error::Restricted { node }) if node == "alias-x"));
+}
+
+#[tokio::test]
 async fn restricted_names_match_ignoring_case_without_request() {
     let server = MockServer::start().await;
     Mock::given(any())

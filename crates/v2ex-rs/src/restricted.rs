@@ -44,15 +44,15 @@ pub(crate) fn by_name(name: &str) -> Option<&'static RestrictedNode> {
 }
 
 /// The restricted node a topic's node reference points at, matching ignoring ASCII case. A
-/// reference with a name is matched by name; one with only a title (tab and hot feeds) is
-/// matched by title.
+/// reference matches by its name or by its title: the title of a node feed is the node's
+/// canonical one, so it catches a name the server resolved from some other spelling, and tab
+/// and hot feeds give no other handle.
 pub(crate) fn of(node: &NodeRef) -> Option<&'static RestrictedNode> {
-    match node.name.as_deref() {
-        Some(name) => by_name(name),
-        None => RESTRICTED
+    node.name.as_deref().and_then(by_name).or_else(|| {
+        RESTRICTED
             .iter()
-            .find(|r| r.title.eq_ignore_ascii_case(&node.title)),
-    }
+            .find(|r| r.title.eq_ignore_ascii_case(&node.title))
+    })
 }
 
 #[cfg(test)]
@@ -71,13 +71,17 @@ mod tests {
     fn matches_by_name_ignoring_case() {
         let found = of(&node(Some("FlameWar"), "x"));
         assert_eq!(found.map(|r| r.name), Some("flamewar"));
-        assert!(of(&node(Some("python"), "NSFW")).is_none());
+        assert!(of(&node(Some("python"), "Python")).is_none());
     }
 
     #[test]
-    fn matches_by_title_when_there_is_no_name() {
+    fn matches_by_title_ignoring_case() {
         assert_eq!(of(&node(None, "nsfw")).map(|r| r.name), Some("nsfw"));
         assert_eq!(of(&node(None, "沙盒")).map(|r| r.name), Some("sandbox"));
+        assert_eq!(
+            of(&node(Some("alias-x"), "NSFW")).map(|r| r.name),
+            Some("nsfw")
+        );
         assert!(of(&node(None, "Python")).is_none());
     }
 }

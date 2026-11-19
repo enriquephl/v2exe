@@ -160,12 +160,18 @@ impl Client {
                 if restricted::by_name(name).is_some() {
                     return Err(restricted_error(name));
                 }
-                self.node_feed(name, TOPICS_TTL).await?
+                // The feed's title is the node's canonical title, so a name the server resolves
+                // to a restricted node shows up here.
+                let topics = self.node_feed(name, TOPICS_TTL).await?;
+                if topics.iter().any(is_restricted) {
+                    return Err(restricted_error(name));
+                }
+                topics
             }
         };
         // Hot, latest and the hot tab name each topic's node; the other listings carry none that
         // is restricted.
-        topics.retain(|t| !t.node.as_ref().is_some_and(|n| restricted::of(n).is_some()));
+        topics.retain(|t| !is_restricted(t));
         Ok(topics)
     }
 
@@ -242,6 +248,13 @@ impl ClientBuilder {
 /// segment or query value it is placed in.
 fn encode(name: &str) -> PercentEncode<'_> {
     utf8_percent_encode(name, NAME_ESCAPES)
+}
+
+fn is_restricted(topic: &Topic) -> bool {
+    topic
+        .node
+        .as_ref()
+        .is_some_and(|n| restricted::of(n).is_some())
 }
 
 fn restricted_error(node: &str) -> Error {
