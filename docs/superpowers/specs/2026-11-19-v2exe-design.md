@@ -159,7 +159,7 @@ pub struct Topic {
     pub author: MemberRef,
     pub node: Option<NodeRef>,           // hot 以外的 tab feed 为 None
     pub created: DateTime<Utc>,
-    pub last_touched: Option<DateTime<Utc>>,   // feed 取 <updated>
+    pub last_touched: Option<DateTime<Utc>>,   // feed 取 <updated>，与 API 1.0 的 last_touched 一致
     pub replies: u32,                    // feed 取链接的 #replyN，没有片段为 0
     pub last_reply_by: Option<String>,   // 只有 API 1.0 有
     pub content: Option<String>,         // 原文，只有 API 1.0 有
@@ -415,7 +415,6 @@ v2exe nodes [关键词]          节点目录，可按节点名或标题过滤
 - 最小终端尺寸的具体数值、阅读页正文的最大行宽。
 - 写死的 tab 名单，以及预置进我的最爱的条目，以对应 feed 实际存在为准。
 - 额度耗尽时站方返回的状态码与响应头没有实测过。实现时把 429 以及余量头为 0 的拒绝响应都当作被限流处理。
-- feed 的 `<updated>` 是否等于最后回复时间，以实测为准；不等时 `last_touched` 留空。
 
 ## 13. 参考项目
 
