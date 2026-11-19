@@ -167,6 +167,18 @@ async fn latest_tab_and_node_read_their_own_sources() {
 }
 
 #[tokio::test]
+async fn unknown_tab_exits_3() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/zzzz.xml", &[], "").mount(&server).await;
+
+    let out = run_against(&server, &["tab", "zzzz"]);
+
+    assert_eq!(out.code, 3, "{}", out.stderr);
+    assert_eq!(out.stdout, "");
+    assert!(out.stderr.contains("找不到"), "{}", out.stderr);
+}
+
+#[tokio::test]
 async fn topic_text() {
     let server = MockServer::start().await;
     serve("/api/topics/show.json", &[("id", "1001")], TOPIC)

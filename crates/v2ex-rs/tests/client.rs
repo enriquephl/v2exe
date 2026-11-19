@@ -245,22 +245,42 @@ async fn plain_tab_drops_recent_restricted_ids_and_skips_failed_sources() {
 }
 
 #[tokio::test]
-async fn restricted_ids_are_fetched_once_across_tab_listings() {
+async fn restricted_ids_are_refetched_with_each_fresh_tab_feed() {
     let server = MockServer::start().await;
     serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .expect(1)
         .mount(&server)
         .await;
     serve("/feed/tab/tech.xml", &[], TAB_FEED)
+        .expect(1)
         .mount(&server)
         .await;
-    mount_restricted_sources(&server, 1).await;
+    mount_restricted_sources(&server, 2).await;
     let client = client(&server);
 
+    // The first two fetch their feed afresh; the third reads its feed from the cache and so
+    // reuses the cached ids.
     client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
     client
         .topics(&Listing::Tab("tech".into()), 1)
         .await
         .unwrap();
+    client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+}
+
+#[tokio::test]
+async fn unknown_tab_is_not_found_and_not_cached() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/zzzz.xml", &[], "")
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+
+    for _ in 0..2 {
+        let result = client.topics(&Listing::Tab("zzzz".into()), 1).await;
+        assert!(matches!(result, Err(Error::NotFound)), "{result:?}");
+    }
 }
 
 #[tokio::test]

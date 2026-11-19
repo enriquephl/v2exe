@@ -7,7 +7,7 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, PercentEncode, utf8_percent_e
 
 use crate::feed::{self, FeedKind};
 use crate::http::{Endpoint, Settings, Transport};
-use crate::restricted::{self, IdSource};
+use crate::restricted::{self, IdSource, RestrictedNode};
 use crate::{Error, Listing, Node, Page, RateLimit, Reply, Result, Topic, api1};
 
 const DEFAULT_BASE_URL: &str = "https://www.v2ex.com";
@@ -151,8 +151,12 @@ impl Client {
                 } else {
                     (format!("/feed/tab/{}.xml", encode(tab)), FeedKind::Plain)
                 };
-                let mut topics = self.feed_topics(&path, &kind, TOPICS_TTL).await?;
-                let hidden = self.restricted_ids().await;
+                let (mut topics, fresh) = self
+                    .fetch_with_freshness(&path, Endpoint::Feed, TOPICS_TTL, |body| {
+                        parse_feed_body(body, &kind)
+                    })
+                    .await?;
+                let hidden = self.restricted_ids(fresh).await;
                 topics.retain(|t| !hidden.contains(&t.id));
                 topics
             }
@@ -177,15 +181,20 @@ impl Client {
     }
 
     /// The ids of the recent topics of every restricted node. A source that fails is skipped.
-    async fn restricted_ids(&self) -> HashSet<u64> {
+    /// With `refresh` the sources are fetched afresh, otherwise cached ids are reused.
+    async fn restricted_ids(&self, refresh: bool) -> HashSet<u64> {
         let mut ids = HashSet::new();
         for node in restricted::RESTRICTED {
+            let path = id_source_path(node);
+            if refresh {
+                self.transport.forget(&path);
+            }
             let topics = match node.source {
-                IdSource::Api => {
-                    let path = format!("/api/topics/show.json?node_name={}", encode(node.name));
-                    self.api_topics(&path, RESTRICTED_IDS_TTL).await
+                IdSource::Api => self.api_topics(&path, RESTRICTED_IDS_TTL).await,
+                IdSource::Feed => {
+                    let kind = FeedKind::Node(node.name.to_string());
+                    self.feed_topics(&path, &kind, RESTRICTED_IDS_TTL).await
                 }
-                IdSource::Feed => self.node_feed(node.name, RESTRICTED_IDS_TTL).await,
             };
             if let Ok(topics) = topics {
                 ids.extend(topics.iter().map(|t| t.id));
@@ -195,9 +204,8 @@ impl Client {
     }
 
     async fn node_feed(&self, name: &str, ttl: Duration) -> Result<Vec<Topic>> {
-        let path = format!("/feed/{}.xml", encode(name));
-        self.feed_topics(&path, &FeedKind::Node(name.to_string()), ttl)
-            .await
+        let kind = FeedKind::Node(name.to_string());
+        self.feed_topics(&node_feed_path(name), &kind, ttl).await
     }
 
     async fn api_topics(&self, path: &str, ttl: Duration) -> Result<Vec<Topic>> {
@@ -207,7 +215,7 @@ impl Client {
 
     async fn feed_topics(&self, path: &str, kind: &FeedKind, ttl: Duration) -> Result<Vec<Topic>> {
         self.fetch(path, Endpoint::Feed, ttl, |body| {
-            feed::parse_feed(body, kind)
+            parse_feed_body(body, kind)
         })
         .await
     }
@@ -221,8 +229,24 @@ impl Client {
         ttl: Duration,
         parse: impl FnOnce(&[u8]) -> Result<T>,
     ) -> Result<T> {
-        let body = self.transport.get(path, endpoint, ttl).await?;
-        parse(&body).inspect_err(|_| self.transport.forget(path))
+        let (parsed, _) = self
+            .fetch_with_freshness(path, endpoint, ttl, parse)
+            .await?;
+        Ok(parsed)
+    }
+
+    /// Like [`Client::fetch`], and also tells whether this call sent the request, as opposed to
+    /// reading the body from the cache.
+    async fn fetch_with_freshness<T>(
+        &self,
+        path: &str,
+        endpoint: Endpoint,
+        ttl: Duration,
+        parse: impl FnOnce(&[u8]) -> Result<T>,
+    ) -> Result<(T, bool)> {
+        let fetched = self.transport.get(path, endpoint, ttl).await?;
+        let parsed = parse(&fetched.body).inspect_err(|_| self.transport.forget(path))?;
+        Ok((parsed, fetched.fresh))
     }
 }
 
@@ -258,6 +282,26 @@ impl ClientBuilder {
             transport: Transport::new(&self.settings)?,
         })
     }
+}
+
+/// Where a restricted node's recent topic ids are fetched from.
+fn id_source_path(node: &RestrictedNode) -> String {
+    match node.source {
+        IdSource::Api => format!("/api/topics/show.json?node_name={}", encode(node.name)),
+        IdSource::Feed => node_feed_path(node.name),
+    }
+}
+
+fn node_feed_path(name: &str) -> String {
+    format!("/feed/{}.xml", encode(name))
+}
+
+/// Parses a feed body. The site answers a tab it does not have with 200 and an empty body.
+fn parse_feed_body(body: &[u8], kind: &FeedKind) -> Result<Vec<Topic>> {
+    if body.is_empty() {
+        return Err(Error::NotFound);
+    }
+    feed::parse_feed(body, kind)
 }
 
 /// Escapes everything but the RFC 3986 unreserved characters, so a name stays inside the path

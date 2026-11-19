@@ -36,6 +36,14 @@ pub(crate) enum Endpoint {
     Feed,
 }
 
+/// A response body, and whether the call that returned it sent the request.
+#[derive(Debug)]
+pub(crate) struct Fetched {
+    pub body: Bytes,
+    /// False when the body came from the cache.
+    pub fresh: bool,
+}
+
 /// Clones share one connection pool, one cache and one quota record.
 #[derive(Clone)]
 pub(crate) struct Transport {
@@ -91,10 +99,11 @@ impl Transport {
     }
 
     /// Fetches `path` (with its query string) from the base URL. A successful body is served
-    /// from the cache for `ttl`; failures are never cached.
-    pub(crate) async fn get(&self, path: &str, kind: Endpoint, ttl: Duration) -> Result<Bytes> {
+    /// from the cache for `ttl`; failures are never cached. Storing a body also drops every
+    /// entry that has expired.
+    pub(crate) async fn get(&self, path: &str, kind: Endpoint, ttl: Duration) -> Result<Fetched> {
         if let Some(body) = self.cached(path) {
-            return Ok(body);
+            return Ok(Fetched { body, fresh: false });
         }
         if kind == Endpoint::Api {
             self.check_quota()?;
@@ -105,9 +114,11 @@ impl Transport {
         loop {
             match self.attempt(&url, kind).await {
                 Ok(body) => {
-                    lock(&self.inner.cache)
-                        .insert(path.to_string(), (Instant::now() + ttl, body.clone()));
-                    return Ok(body);
+                    let now = Instant::now();
+                    let mut cache = lock(&self.inner.cache);
+                    cache.retain(|_, (expires, _)| *expires > now);
+                    cache.insert(path.to_string(), (now + ttl, body.clone()));
+                    return Ok(Fetched { body, fresh: true });
                 }
                 Err(Failure::Retry(_)) if retries < MAX_RETRIES => {
                     retries += 1;
@@ -241,7 +252,7 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::{Endpoint, Settings, Transport};
+    use super::{Endpoint, Settings, Transport, lock};
     use crate::{Error, RateLimit};
 
     const TTL: Duration = Duration::from_secs(60);
@@ -280,8 +291,8 @@ mod tests {
         let first = t.get("/a", Endpoint::Feed, TTL).await.unwrap();
         let second = t.get("/a", Endpoint::Feed, TTL).await.unwrap();
 
-        assert_eq!(first, second);
-        assert_eq!(&first[..], b"hello");
+        assert_eq!(first.body, second.body);
+        assert_eq!(&first.body[..], b"hello");
     }
 
     #[tokio::test]
@@ -322,7 +333,10 @@ mod tests {
             t.get("/a", Endpoint::Feed, TTL).await,
             Err(Error::NotFound)
         ));
-        assert_eq!(&t.get("/a", Endpoint::Feed, TTL).await.unwrap()[..], b"ok");
+        assert_eq!(
+            &t.get("/a", Endpoint::Feed, TTL).await.unwrap().body[..],
+            b"ok"
+        );
     }
 
     #[tokio::test]
@@ -338,6 +352,41 @@ mod tests {
 
         t.get("/a", Endpoint::Feed, Duration::ZERO).await.unwrap();
         t.get("/a", Endpoint::Feed, Duration::ZERO).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn storing_an_entry_drops_expired_ones() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let t = transport(&server);
+
+        t.get("/a", Endpoint::Feed, Duration::ZERO).await.unwrap();
+        t.get("/b", Endpoint::Feed, TTL).await.unwrap();
+
+        assert_eq!(lock(&t.inner.cache).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fresh_is_true_only_when_a_request_was_sent() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("hello"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let t = transport(&server);
+
+        let first = t.get("/a", Endpoint::Feed, TTL).await.unwrap();
+        let second = t.get("/a", Endpoint::Feed, TTL).await.unwrap();
+
+        assert!(first.fresh);
+        assert!(!second.fresh);
+        assert_eq!(first.body, second.body);
     }
 
     #[tokio::test]
@@ -537,7 +586,10 @@ mod tests {
             .await;
         let t = transport(&server);
 
-        assert_eq!(&t.get("/a", Endpoint::Feed, TTL).await.unwrap()[..], b"ok");
+        assert_eq!(
+            &t.get("/a", Endpoint::Feed, TTL).await.unwrap().body[..],
+            b"ok"
+        );
     }
 
     #[tokio::test]
