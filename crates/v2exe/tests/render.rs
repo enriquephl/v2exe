@@ -304,6 +304,28 @@ fn sanitize_drops_control_characters() {
 }
 
 #[test]
+fn sanitize_drops_bidirectional_controls() {
+    let controls: Vec<char> = ('\u{202a}'..='\u{202e}')
+        .chain('\u{2066}'..='\u{2069}')
+        .collect();
+    assert_eq!(controls.len(), 9);
+    for c in controls {
+        assert_eq!(sanitize(&format!("a{c}b")), "ab", "U+{:04X}", u32::from(c));
+    }
+    // A joiner is no bidirectional control: emoji sequences need it.
+    assert_eq!(sanitize("👨\u{200d}👩"), "👨\u{200d}👩");
+}
+
+#[test]
+fn bidirectional_controls_never_reach_rendered_text() {
+    assert_eq!(
+        texts(&render_html("<p>a\u{202e}b\u{2067}c\u{2069}d</p>")),
+        vec!["abcd"]
+    );
+    assert_eq!(texts(&render_html("<pre>x\u{202d}y</pre>")), vec!["xy"]);
+}
+
+#[test]
 fn sanitize_expands_tabs_to_multiples_of_four_columns() {
     assert_eq!(sanitize("\tx"), "    x");
     assert_eq!(sanitize("ab\tx"), "ab  x");

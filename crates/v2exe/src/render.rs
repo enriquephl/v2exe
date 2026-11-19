@@ -78,8 +78,15 @@ fn cell_widths(chars: impl Iterator<Item = char>) -> impl Iterator<Item = usize>
     })
 }
 
-/// Drops control characters (C0, DEL, C1) and expands tabs to the next multiple
-/// of 4 columns, counted from the start of `s`.
+/// Whether `c` never reaches the terminal: a control character (C0, DEL, C1), or a
+/// bidirectional embedding, override or isolate control (U+202A–U+202E, U+2066–U+2069), which
+/// reorders the text around it on terminals that implement bidi.
+fn is_dropped(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Drops control characters (C0, DEL, C1) and bidirectional controls, and expands tabs to the
+/// next multiple of 4 columns, counted from the start of `s`.
 pub fn sanitize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut col = 0;
@@ -88,7 +95,7 @@ pub fn sanitize(s: &str) -> String {
             let n = 4 - col % 4;
             out.extend(std::iter::repeat_n(' ', n));
             col += n;
-        } else if !c.is_control() {
+        } else if !is_dropped(c) {
             out.push(c);
             col += char_width(c);
         }
@@ -315,7 +322,7 @@ impl Renderer {
     }
 
     /// Adds text with whitespace runs collapsed to one space and other control
-    /// characters dropped.
+    /// characters, bidirectional ones included, dropped.
     fn push_text(&mut self, raw: &str, role: Role) {
         let mut text = String::new();
         let mut at_space = self.at_space;
@@ -325,7 +332,7 @@ impl Renderer {
                     text.push(' ');
                 }
                 at_space = true;
-            } else if !c.is_control() {
+            } else if !is_dropped(c) {
                 text.push(c);
                 at_space = false;
             }
