@@ -7,11 +7,15 @@ pub fn parse_topic_ref(s: &str) -> Option<u64> {
     let digits = if s.bytes().all(|b| b.is_ascii_digit()) {
         s
     } else {
-        let link = s
-            .strip_prefix("https://")
-            .or_else(|| s.strip_prefix("http://"))
-            .unwrap_or(s);
-        let rest = link[link.find('/')?..].strip_prefix("/t/")?;
+        let link = match s.split_once("://") {
+            Some((scheme, rest)) if scheme.bytes().all(|b| b.is_ascii_alphabetic()) => rest,
+            _ => s,
+        };
+        let (host, path) = link.split_at(link.find('/')?);
+        if host.contains(['?', '#', ' ']) {
+            return None;
+        }
+        let rest = path.strip_prefix("/t/")?;
         let end = rest
             .find(|c: char| !c.is_ascii_digit())
             .unwrap_or(rest.len());
@@ -44,6 +48,10 @@ mod tests {
             ("https://example.org/search?q=/t/123", None),
             ("https://www.v2ex.com/archive/t/123", None),
             ("t/123", None),
+            ("HTTPS://www.v2ex.com/t/123", Some(123)),
+            ("/t/123?from=http://x", Some(123)),
+            ("https://example.org?t=/t/123", None),
+            ("not a host/t/123", None),
         ] {
             assert_eq!(parse_topic_ref(s), want, "{s}");
         }
