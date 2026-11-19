@@ -1,0 +1,48 @@
+{
+  "upstream": "https://github.com/etherfunlab/workflow.git",
+  "commit": "eec36e50a538ad0e02620fb07c2be53851d51ce8",
+  "adopted_at": "2026-11-19",
+  "language": "zh",
+  "agent": "claude-code",
+  "modules": {
+    "templates/base": {
+      "files": ["AGENTS.md", "CLAUDE.md", "docs/superpowers/specs/", "docs/superpowers/plans/"]
+    },
+    "templates/dev-root": {
+      "files": ["../CLAUDE.md"],
+      "skipped": [
+        "Production data: nothing in the governed repositories reaches production data",
+        "Numbers in reports: no reports are produced here",
+        "Public repositories, anonymized production evidence: no production deployment exists",
+        "Pull requests: left to the CLAUDE.md two directories above the target",
+        "APIs billed per call: left to ~/.claude/CLAUDE.md",
+        "Judgment that lives in human eyes: left to ~/.claude/CLAUDE.md",
+        "Requirements, investigate first then ask: left to ~/.claude/CLAUDE.md",
+        "Mirror hook for the parent-directory file: user declined"
+      ]
+    },
+    "engineering": {
+      "files": ["AGENTS.md#Engineering"],
+      "skipped": [
+        "Tuning lowers the error rate: user declined, no tuned metric in this project",
+        "Read live state from releases, not branches: user declined, nothing is deployed",
+        "Foreign keys are decided at table creation: user declined, no database",
+        "Default-open, then ratchet the gate: user declined, no gated capability"
+      ]
+    },
+    "carriers": {
+      "files": ["AGENTS.md#Carriers"],
+      "skipped": [
+        "Deliverables carry results, not process: left to ~/.claude/CLAUDE.md",
+        "Schema definitions line: SCHEMA_SOURCE answered empty, no database"
+      ]
+    },
+    "rules-files": {
+      "files": [".claude/rules/rules-files.md", "AGENTS.md#按这个顺序读"],
+      "skipped": [
+        "Write the rule, not the incident: left to ~/.claude/CLAUDE.md",
+        "Delete cleanly (rule files): left to ~/.claude/CLAUDE.md"
+      ]
+    }
+  }
+}
