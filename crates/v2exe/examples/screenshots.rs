@@ -377,14 +377,17 @@ fn page(title: &str, buffer: &Buffer) -> String {
             if cell.modifier.contains(Modifier::DIM) {
                 classes.push_str(" dim");
             }
-            let text = match symbol {
-                "&" => "&amp;",
-                "<" => "&lt;",
-                ">" => "&gt;",
-                " " => "&nbsp;",
-                other => other,
-            };
-            let _ = write!(rows, "<i class=\"{}\">{text}</i>", classes.trim_start());
+            let _ = write!(rows, "<i class=\"{}\">", classes.trim_start());
+            for c in symbol.chars() {
+                match c {
+                    '&' => rows.push_str("&amp;"),
+                    '<' => rows.push_str("&lt;"),
+                    '>' => rows.push_str("&gt;"),
+                    ' ' => rows.push_str("&nbsp;"),
+                    other => rows.push(other),
+                }
+            }
+            rows.push_str("</i>");
         }
         rows.push_str("</div>\n");
     }
