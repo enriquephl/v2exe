@@ -295,7 +295,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc::UnboundedReceiver;
     use tokio::sync::mpsc::error::TryRecvError;
-    use v2ex_rs::Error;
+    use v2ex_rs::{Error, Listing};
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -303,6 +303,7 @@ mod tests {
     use crate::tui::Start;
     use crate::tui::app::testing::{launch, node, tz};
 
+    const TOPICS: &str = include_str!("../../../v2ex-rs/tests/fixtures/api1/topics.json");
     const TOPIC: &str = include_str!("../../../v2ex-rs/tests/fixtures/api1/topic.json");
     const TOPIC_RESTRICTED: &str =
         include_str!("../../../v2ex-rs/tests/fixtures/api1/topic_restricted.json");
@@ -413,6 +414,44 @@ mod tests {
             };
             assert_eq!(reason, want);
         }
+    }
+
+    /// Loads the hot listing twice through one runner, the second time with `refresh`, from a
+    /// site that expects `requests` requests for it.
+    async fn load_hot_twice(refresh: bool, requests: u64) {
+        let server = MockServer::start().await;
+        serve("/api/topics/hot.json", None, TOPICS, requests)
+            .mount(&server)
+            .await;
+        let (runner, mut rx) = runner(&server, None);
+        let (app, _) = launch(Start::Home);
+
+        for (ticket, refresh) in [(1, false), (2, refresh)] {
+            runner.execute(
+                Cmd::LoadTopics {
+                    ticket,
+                    listing: Listing::Hot,
+                    refresh,
+                },
+                &app,
+            );
+            let Some(Ok(Msg::TopicsLoaded { result, .. })) = rx.recv().await else {
+                panic!("expected TopicsLoaded");
+            };
+            assert!(result.is_ok(), "{result:?}");
+        }
+
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_refresh_asks_the_site_again() {
+        load_hot_twice(true, 2).await;
+    }
+
+    #[tokio::test]
+    async fn without_a_refresh_the_cached_listing_is_reused() {
+        load_hot_twice(false, 1).await;
     }
 
     #[tokio::test]
