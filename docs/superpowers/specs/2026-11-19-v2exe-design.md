@@ -49,12 +49,13 @@
 | API 1.0 `/api/nodes/all.json` | 全部节点，约 1400 个、约 800 KB | |
 | API 1.0 `/api/nodes/show.json?name=` | 单个节点 | |
 | Atom `/feed/{node}.xml` | 节点最新 50 条，含完整正文 HTML | 按发帖时间排；不能翻页；回复数只在链接的 `#replyN` 片段里 |
-| Atom `/feed/tab/{tab}.xml`、`/index.xml` | 分 tab 列表与全站最新，50 条左右 | 标题带 `[节点标题]` 前缀，没有节点名 |
+| Atom `/feed/tab/hot.xml`、`/index.xml` | 前一天的最热 40 条；全站最新 50 条 | 每条标题都带 `[节点标题]` 前缀，没有节点名 |
+| Atom `/feed/tab/{tab}.xml`（hot 以外） | 分 tab 列表，50 到 60 条 | 不带任何节点信息，标题里的方括号是作者自己写的；会包含受限节点的帖子 |
 | API 2.0 `/api/v2/…` | 节点列表翻页、回复翻页、通知 | 没有 token 一律 401 |
 
 - **限流**：600 次 / 小时 / IP，API 1.0 与 2.0 共用一个额度，响应头 `X-Rate-Limit-Limit / -Remaining / -Reset` 给出余量。CDN 命中的响应不扣额度。feed 不带限流头。
 - **排序**：API 1.0 与 feed 的节点列表按发帖时间排，网页按最后回复时间排。v2exe 第一版按发帖时间排，与 PTT 的文章列表习惯一致。
-- **受限节点**：`flamewar`、`nsfw`、`sandbox` 的网页对游客跳转到登录页，但 API 1.0 仍返回其内容。
+- **受限节点**：`flamewar`、`nsfw`、`sandbox` 的网页对游客跳转到登录页，但 API 1.0 仍返回其内容。网页的 tab 页对游客不显示这些节点的帖子，tab feed 却会包含。`nsfw` 与 `sandbox` 的节点 feed 正常，`flamewar` 的返回 404。
 - **站点没有对非浏览器客户端设挑战**；主站在部分地区连不上，站点地址和代理必须可配置。
 - **登录**：没有面向第三方的 OAuth。个人访问令牌在网页上生成，最长 180 天。
 
@@ -139,7 +140,7 @@ impl Client {
 |---|---|---|
 | `topics(Hot)` | API 1.0 `hot.json` | 10 |
 | `topics(Latest)` | API 1.0 `latest.json` | 约 42 |
-| `topics(Tab(t))` | Atom `/feed/tab/{t}.xml` | 约 50 |
+| `topics(Tab(t))` | Atom `/feed/tab/{t}.xml` | 40 到 60 |
 | `topics(Node(n))` | Atom `/feed/{n}.xml` | 50 |
 | `topic(id)` | API 1.0 `topics/show.json?id=` | |
 | `replies(id, 1)` | API 1.0 `replies/show.json?topic_id=` | 全部 |
@@ -153,10 +154,10 @@ impl Client {
 ```rust
 pub struct Topic {
     pub id: u64,
-    pub title: String,                   // 已去掉 tab feed 的 "[节点标题]" 前缀
+    pub title: String,                   // tab/hot feed 的 "[节点标题]" 前缀已拆进 node
     pub url: String,
     pub author: MemberRef,
-    pub node: Option<NodeRef>,
+    pub node: Option<NodeRef>,           // hot 以外的 tab feed 为 None
     pub created: DateTime<Utc>,
     pub last_touched: Option<DateTime<Utc>>,   // feed 取 <updated>
     pub replies: u32,                    // feed 取链接的 #replyN，没有片段为 0
@@ -186,7 +187,7 @@ pub struct Node {
 }
 
 pub struct MemberRef { pub username: String, pub id: Option<u64> }
-pub struct NodeRef   { pub name: Option<String>, pub title: String }   // tab feed 只有标题
+pub struct NodeRef   { pub name: Option<String>, pub title: String }   // tab/hot feed 只有标题
 pub struct RateLimit { pub limit: u32, pub remaining: u32, pub reset: DateTime<Utc> }
 ```
 
@@ -207,10 +208,11 @@ pub enum Error {
 
 ### 6.5 行为
 
-- **受限节点**：库内置一份受限节点名单，每项含节点名和节点标题，初始为 `flamewar`、`nsfw`、`sandbox`，发现新的再补。未登录时：
+- **受限节点**：库内置一份受限节点名单，每项含节点名、节点标题、取其最近帖子编号的来源。初始三项：`flamewar`（水深火热，API 1.0 `topics/show.json?node_name=`，10 条）、`nsfw`（NSFW，节点 feed，50 条）、`sandbox`（沙盒，节点 feed，50 条）。发现新的再补。未登录时：
   - `topics(Node(受限))` 与 `node(受限)` 返回 `Restricted`。
   - `topic(id)` 取回后发现属于受限节点，返回 `Restricted`。
-  - `Hot / Latest` 列表按节点名滤掉受限节点的条目；`Tab` 列表的 feed 只有节点标题，按标题滤。
+  - `Hot / Latest` 列表按节点名滤；`Tab("hot")` 按标题前缀里的节点标题滤。
+  - 其余 `Tab` 列表不带节点信息：取列表时另取各受限节点最近的帖子编号，滤掉编号对得上的条目。这份编号集合缓存 10 分钟；某个来源取失败时跳过它，列表照常返回。发帖较早、最近又有人回的受限帖子可能漏过，列表里只露出标题，打开时由 `topic(id)` 拦下。
   - `nodes()` 不含受限节点。
   - `replies(id)` 的响应不带节点信息，自己不做检查。程序在取回复之前一定先调用 `topic(id)`，由它把关。
 - **限流**：每次 API 响应后记下余量。余量为 0 且未到恢复时间时，不发请求，直接返回 `RateLimited`。站方拒绝请求时同样映射为 `RateLimited`，不重试。余量只记在进程内，不跨进程保存：非互动式每次运行最多两次 API 请求，超额由站方拒绝、程序以退出码 4 结束。
@@ -412,7 +414,6 @@ v2exe nodes [关键词]          节点目录，可按节点名或标题过滤
 - 绕过缓存的调用形式。
 - 最小终端尺寸的具体数值、阅读页正文的最大行宽。
 - 写死的 tab 名单，以及预置进我的最爱的条目，以对应 feed 实际存在为准。
-- 受限节点名单里各节点的标题，以节点接口返回的为准。
 - 额度耗尽时站方返回的状态码与响应头没有实测过。实现时把 429 以及余量头为 0 的拒绝响应都当作被限流处理。
 - feed 的 `<updated>` 是否等于最后回复时间，以实测为准；不等时 `last_touched` 留空。
 
