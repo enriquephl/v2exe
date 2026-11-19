@@ -51,7 +51,7 @@ async fn interactive(command: Option<Command>, cli: &Cli, env: &RunEnv) -> Resul
     };
     tui::run(settings.client, options)
         .await
-        .map_err(|e| Failure::new(1, format!("终端出错：{e}")))
+        .map_err(|e| Failure::new(1, format!("界面出错：{e}")))
 }
 
 /// The screen the interface opens on: the listing or the topic `command` names; the start

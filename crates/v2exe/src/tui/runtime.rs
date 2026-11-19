@@ -21,17 +21,32 @@ use crate::store::favorites::Favorites;
 use crate::store::node_cache::{load_nodes, save_nodes};
 use crate::store::read_state::ReadState;
 
+/// What a background task that panicked comes back as.
+const TASK_PANICKED: &str = "后台任务意外中止";
+
 /// Runs the interface until the user quits. The terminal is in raw mode on the alternate screen
-/// meanwhile, and is restored before this returns and before a panic is reported.
+/// meanwhile, and is restored before this returns and before a panic is reported. A panic in a
+/// background task ends the interface with an error.
 pub async fn run(client: Client, options: Options) -> io::Result<()> {
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
     let result = run_in(&mut terminal, client, options).await;
-    ratatui::restore();
+    // The panic hook has restored the terminal when raw mode is already off. Restoring again
+    // would leave the alternate screen twice, which moves the cursor back over the panic report.
+    if raw_mode() {
+        ratatui::restore();
+    }
     result
 }
 
+/// Whether the terminal is still in the raw mode `run` entered. Only a restore turns it off, and
+/// while the loop runs only the panic hook restores: raw mode off then means something panicked.
+fn raw_mode() -> bool {
+    crossterm::terminal::is_raw_mode_enabled().unwrap_or(true)
+}
+
 /// Draws a frame, waits for a message, updates the app with it and carries out its commands,
-/// until the app quits.
+/// until the app quits. Stops with an error once a panic has restored the terminal, before
+/// drawing over the report.
 async fn run_in(
     terminal: &mut DefaultTerminal,
     client: Client,
@@ -73,11 +88,14 @@ async fn run_in(
 
     let theme = Theme { color };
     while !app.quit {
+        if !raw_mode() {
+            return Err(io::Error::other(TASK_PANICKED));
+        }
         terminal.draw(|frame| view(&app, &theme, edge, Utc::now(), frame))?;
-        let Some(msg) = rx.recv().await else {
+        let Some(next) = rx.recv().await else {
             break;
         };
-        for cmd in app.update(msg, Utc::now()) {
+        for cmd in app.update(next?, Utc::now()) {
             runner.execute(cmd, &app);
         }
     }
@@ -86,7 +104,7 @@ async fn run_in(
 
 /// Sends key presses and every new terminal size from a thread of its own, which blocks reading
 /// the terminal. The thread ends when the terminal cannot be read or the interface is gone.
-fn forward_input(tx: UnboundedSender<Msg>) {
+fn forward_input(tx: UnboundedSender<io::Result<Msg>>) {
     thread::spawn(move || {
         while let Ok(event) = event::read() {
             let msg = match event {
@@ -94,7 +112,7 @@ fn forward_input(tx: UnboundedSender<Msg>) {
                 Event::Resize(columns, rows) => Msg::Resize(columns, rows),
                 _ => continue,
             };
-            if tx.send(msg).is_err() {
+            if tx.send(Ok(msg)).is_err() {
                 break;
             }
         }
@@ -102,10 +120,11 @@ fn forward_input(tx: UnboundedSender<Msg>) {
 }
 
 /// Carries out commands. A request runs in a task of its own and its result comes back as a
-/// message; a file write or the browser runs in place, and only a failure comes back.
+/// message; a file write or the browser runs in place, and only a failure comes back. A task
+/// that panics comes back as an error, which ends the loop.
 struct Runner {
     client: Client,
-    tx: UnboundedSender<Msg>,
+    tx: UnboundedSender<io::Result<Msg>>,
     /// `nodes.json` in the cache directory, when there is one.
     nodes_path: Option<PathBuf>,
 }
@@ -121,11 +140,11 @@ impl Runner {
                 let client = self.client_for(refresh);
                 self.spawn(async move {
                     let result = client.topics(&listing, 1).await.map(|page| page.items);
-                    Msg::TopicsLoaded {
+                    vec![Msg::TopicsLoaded {
                         ticket,
                         result,
                         quota: client.rate_limit(),
-                    }
+                    }]
                 });
             }
             Cmd::LoadThread {
@@ -141,11 +160,11 @@ impl Runner {
                         Ok(topic) => client.replies(id, 1).await.map(|page| (topic, page.items)),
                         Err(e) => Err(e),
                     };
-                    Msg::ThreadLoaded {
+                    vec![Msg::ThreadLoaded {
                         ticket,
                         result,
                         quota: client.rate_limit(),
-                    }
+                    }]
                 });
             }
             Cmd::LoadDirectory { refresh } => self.load_directory(refresh),
@@ -184,20 +203,20 @@ impl Runner {
         }
         let client = self.client_for(refresh);
         let path = self.nodes_path.clone();
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
+        self.spawn(async move {
             let result = client.nodes().await;
             let saved = match (&result, &path) {
                 (Ok(nodes), Some(path)) => save_nodes(path, nodes, Utc::now()),
                 _ => Ok(()),
             };
-            let _ = tx.send(Msg::DirectoryLoaded {
+            let mut msgs = vec![Msg::DirectoryLoaded {
                 result,
                 quota: client.rate_limit(),
-            });
+            }];
             if let Err(e) = saved {
-                let _ = tx.send(Msg::SaveFailed(format!("无法写入 nodes.json：{e}")));
+                msgs.push(Msg::SaveFailed(format!("无法写入 nodes.json：{e}")));
             }
+            msgs
         });
     }
 
@@ -209,17 +228,29 @@ impl Runner {
         self.client.clone()
     }
 
-    /// Runs `task` on its own and sends the message it ends with.
-    fn spawn(&self, task: impl Future<Output = Msg> + Send + 'static) {
+    /// Runs `task` in a task of its own and sends the messages it ends with, in order. Every
+    /// background task goes through here: when one panics, tokio keeps the panic in the task,
+    /// so this sends it on as the error that ends the loop.
+    fn spawn(&self, task: impl Future<Output = Vec<Msg>> + Send + 'static) {
         let tx = self.tx.clone();
+        let task = tokio::spawn(task);
         tokio::spawn(async move {
-            let _ = tx.send(task.await);
+            match task.await {
+                Ok(msgs) => {
+                    for msg in msgs {
+                        let _ = tx.send(Ok(msg));
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(Err(io::Error::other(TASK_PANICKED)));
+                }
+            }
         });
     }
 
     /// The receiver lives as long as the runner, so the message always arrives.
     fn send(&self, msg: Msg) {
-        let _ = self.tx.send(msg);
+        let _ = self.tx.send(Ok(msg));
     }
 }
 
@@ -276,7 +307,7 @@ mod tests {
     fn runner(
         server: &MockServer,
         nodes_path: Option<PathBuf>,
-    ) -> (Runner, UnboundedReceiver<Msg>) {
+    ) -> (Runner, UnboundedReceiver<io::Result<Msg>>) {
         let client = Client::builder().base_url(server.uri()).build().unwrap();
         let (tx, rx) = unbounded_channel();
         let runner = Runner {
@@ -285,6 +316,36 @@ mod tests {
             nodes_path,
         };
         (runner, rx)
+    }
+
+    #[tokio::test]
+    async fn a_task_that_panics_comes_back_as_the_error_that_ends_the_loop() {
+        let server = MockServer::start().await;
+        let (runner, mut rx) = runner(&server, None);
+
+        runner.spawn(async { panic!("示例：解析时出错") });
+
+        let Some(Err(e)) = rx.recv().await else {
+            panic!("expected an error");
+        };
+        assert_eq!(e.to_string(), "后台任务意外中止");
+        drop(runner);
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_task_sends_its_messages_in_order() {
+        let server = MockServer::start().await;
+        let (runner, mut rx) = runner(&server, None);
+
+        runner.spawn(async { vec![Msg::SaveFailed("一".into()), Msg::SaveFailed("二".into())] });
+
+        for want in ["一", "二"] {
+            let Some(Ok(Msg::SaveFailed(reason))) = rx.recv().await else {
+                panic!("expected SaveFailed");
+            };
+            assert_eq!(reason, want);
+        }
     }
 
     #[tokio::test]
@@ -313,7 +374,7 @@ mod tests {
             &app,
         );
 
-        let Some(Msg::ThreadLoaded { ticket, result, .. }) = rx.recv().await else {
+        let Some(Ok(Msg::ThreadLoaded { ticket, result, .. })) = rx.recv().await else {
             panic!("expected ThreadLoaded");
         };
         let (topic, replies) = result.unwrap();
@@ -346,7 +407,7 @@ mod tests {
             &app,
         );
 
-        let Some(Msg::ThreadLoaded { result, .. }) = rx.recv().await else {
+        let Some(Ok(Msg::ThreadLoaded { result, .. })) = rx.recv().await else {
             panic!("expected ThreadLoaded");
         };
         assert!(
@@ -368,7 +429,7 @@ mod tests {
             .mount(&server)
             .await;
         runner.execute(Cmd::LoadDirectory { refresh: false }, &app);
-        let Some(Msg::DirectoryLoaded { result, quota }) = rx.recv().await else {
+        let Some(Ok(Msg::DirectoryLoaded { result, quota })) = rx.recv().await else {
             panic!("expected DirectoryLoaded");
         };
         assert_eq!(result.unwrap()[0].name, "saved");
@@ -380,7 +441,7 @@ mod tests {
             .mount(&server)
             .await;
         runner.execute(Cmd::LoadDirectory { refresh: true }, &app);
-        let Some(Msg::DirectoryLoaded { result, .. }) = rx.recv().await else {
+        let Some(Ok(Msg::DirectoryLoaded { result, .. })) = rx.recv().await else {
             panic!("expected DirectoryLoaded");
         };
         let names: Vec<String> = result.unwrap().into_iter().map(|n| n.name).collect();
@@ -413,7 +474,7 @@ mod tests {
         runner.execute(Cmd::OpenUrl("file:///etc/hosts".into()), &app);
 
         for name in ["favorites.json", "read.json", "http"] {
-            let Some(Msg::SaveFailed(reason)) = rx.recv().await else {
+            let Some(Ok(Msg::SaveFailed(reason))) = rx.recv().await else {
                 panic!("expected SaveFailed");
             };
             assert!(reason.contains(name), "{name}: {reason}");
