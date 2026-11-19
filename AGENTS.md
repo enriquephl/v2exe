@@ -58,4 +58,4 @@
 
 - 项目级的总体 spec 与给人看的材料：`docs/`
 - 功能 spec 与 plan：`docs/superpowers/`
-- 接口定义：`crates/v2ex` 的代码
+- 接口定义：`crates/v2ex-rs` 的代码
