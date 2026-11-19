@@ -1,3 +1,6 @@
+// Only tests call the parsers.
+#[cfg_attr(not(test), expect(dead_code))]
+mod api1;
 mod error;
 mod types;
 

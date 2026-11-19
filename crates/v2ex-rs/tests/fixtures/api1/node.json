@@ -1,0 +1,18 @@
+{
+  "id": 90,
+  "name": "python",
+  "title": "Python",
+  "title_alternative": "Python",
+  "url": "https://www.v2ex.com/go/python",
+  "topics": 16302,
+  "stars": 9000,
+  "header": "这里讨论 Python",
+  "footer": null,
+  "parent_node_name": "programming",
+  "root": false,
+  "aliases": [],
+  "founder_id": 1,
+  "avatar_mini": "https://cdn.v2ex.com/navatar/0090/0090_24.png",
+  "avatar_normal": "https://cdn.v2ex.com/navatar/0090/0090_48.png",
+  "avatar_large": "https://cdn.v2ex.com/navatar/0090/0090_73.png"
+}
