@@ -19,13 +19,15 @@ const TAB_FEED: &str = include_str!("../../v2ex-rs/tests/fixtures/feed/tab.xml")
 const USER_AGENT: &str = concat!("v2exe/", env!("CARGO_PKG_VERSION"));
 
 /// Variables that would send test traffic elsewhere or switch colors on and off.
-const CLEARED_ENV: [&str; 7] = [
+const CLEARED_ENV: [&str; 9] = [
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
+    "NO_PROXY",
     "http_proxy",
     "https_proxy",
     "all_proxy",
+    "no_proxy",
     "NO_COLOR",
 ];
 
@@ -447,6 +449,30 @@ async fn zero_timeout_in_config_exits_1() {
         out.stderr
     );
     assert!(out.stderr.contains("timeout"), "{}", out.stderr);
+}
+
+#[tokio::test]
+async fn bad_base_url_or_proxy_in_config_exits_1_naming_the_file() {
+    let server = MockServer::start().await;
+    for key in ["base_url", "proxy"] {
+        let home = tempfile::tempdir().unwrap();
+        let config_dir = home.path().join("v2exe");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config = config_dir.join("config.toml");
+        std::fs::write(&config, format!("{key} = \"not a url\"\n")).unwrap();
+        let mut cmd = command(home.path());
+        cmd.args(["--base-url", &server.uri(), "hot"]);
+
+        let out = finish(cmd);
+
+        assert_eq!(out.code, 1, "{key}: {}", out.stderr);
+        assert!(
+            out.stderr.contains(&config.display().to_string()),
+            "{key}: {}",
+            out.stderr
+        );
+        assert!(out.stderr.contains("有误"), "{key}: {}", out.stderr);
+    }
 }
 
 #[tokio::test]

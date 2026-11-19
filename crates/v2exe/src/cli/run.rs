@@ -2,19 +2,20 @@
 
 use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{FixedOffset, Local};
 use clap::CommandFactory;
-use v2ex_rs::{Client, Listing, Node};
+use v2ex_rs::{Client, ClientBuilder, Listing, Node};
 
 use super::args::{Cli, Command};
 use super::exit::{exit_code, message};
 use super::output::{self, Painter};
 use super::topic_ref::parse_topic_ref;
-use crate::config::{self, Config};
 use crate::render::sanitize;
+use crate::store::config::{self, Config, ConfigError};
+use crate::store::paths::Dirs;
 
 /// What the process environment decides: where the settings file is, whether to color and wrap
 /// the text, and the offset times are shown in.
@@ -32,7 +33,9 @@ impl RunEnv {
     pub fn from_process() -> RunEnv {
         let tty = io::stdout().is_terminal();
         RunEnv {
-            config_path: config::config_path(),
+            config_path: Dirs::from_process()
+                .config
+                .map(|dir| dir.join("config.toml")),
             color: color_enabled(tty, std::env::var_os("NO_COLOR").as_deref()),
             width: tty
                 .then(|| crossterm::terminal::size().ok())
@@ -89,20 +92,22 @@ pub async fn run(cli: Cli, out: &mut dyn Write, env: &RunEnv) -> Result<(), Fail
         Some(path) => config::load(path).map_err(|e| Failure::new(1, e.to_string()))?,
         None => Config::default(),
     };
-    let mut builder = Client::builder().user_agent(concat!("v2exe/", env!("CARGO_PKG_VERSION")));
-    if let Some(url) = base_url.or(config.base_url) {
-        builder = builder.base_url(url);
-    }
-    if let Some(url) = proxy.or(config.proxy) {
-        builder = builder.proxy(url);
-    }
-    if let Some(secs) = timeout.or(config.timeout) {
-        builder = builder.timeout(Duration::from_secs(secs));
+    if let Some(path) = &env.config_path
+        && (config.base_url.is_some() || config.proxy.is_some())
+    {
+        // A bad value in the file is the file's fault even when a flag overrides it.
+        client_builder(config.base_url.clone(), config.proxy.clone(), None)
+            .build()
+            .map_err(|e| Failure::new(1, config_error(path, &e, &env.tz).to_string()))?;
     }
     let session = Session {
-        client: builder
-            .build()
-            .map_err(|e| Failure::from_error(&e, &env.tz))?,
+        client: client_builder(
+            base_url.or(config.base_url),
+            proxy.or(config.proxy),
+            timeout.or(config.timeout),
+        )
+        .build()
+        .map_err(|e| Failure::from_error(&e, &env.tz))?,
         json,
         painter: Painter {
             color: env.color && !no_color,
@@ -122,6 +127,35 @@ pub async fn run(cli: Cli, out: &mut dyn Write, env: &RunEnv) -> Result<(), Fail
         Command::Nodes { keyword, limit } => session.nodes(keyword.as_deref(), limit).await?,
     };
     write_out(out, &text)
+}
+
+fn client_builder(
+    base_url: Option<String>,
+    proxy: Option<String>,
+    timeout: Option<u64>,
+) -> ClientBuilder {
+    let mut builder = Client::builder().user_agent(concat!("v2exe/", env!("CARGO_PKG_VERSION")));
+    if let Some(url) = base_url {
+        builder = builder.base_url(url);
+    }
+    if let Some(url) = proxy {
+        builder = builder.proxy(url);
+    }
+    if let Some(secs) = timeout {
+        builder = builder.timeout(Duration::from_secs(secs));
+    }
+    builder
+}
+
+/// A library error caused by a value read from the settings file at `path`.
+fn config_error(path: &Path, e: &v2ex_rs::Error, tz: &FixedOffset) -> ConfigError {
+    ConfigError {
+        path: path.to_path_buf(),
+        reason: match e {
+            v2ex_rs::Error::Config(reason) => reason.clone(),
+            other => message(other, tz),
+        },
+    }
 }
 
 struct Session<'a> {

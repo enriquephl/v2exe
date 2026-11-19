@@ -61,12 +61,15 @@ v2exe -i node python
 
 ## 配置
 
-`--base-url`、`--proxy`、`--timeout` 也可以写进配置文件 `$XDG_CONFIG_HOME/v2exe/config.toml`；未设 `XDG_CONFIG_HOME` 时是 `~/.config/v2exe/config.toml`，macOS 同样如此。键是 `base_url`、`proxy`、`timeout`，命令行选项优先。文件不存在就用默认值，v2exe 不会创建它。
+`--base-url`、`--proxy`、`--timeout` 也可以写进配置文件 `$XDG_CONFIG_HOME/v2exe/config.toml`；未设 `XDG_CONFIG_HOME` 时是 `~/.config/v2exe/config.toml`，macOS 同样如此。键是 `base_url`、`proxy`、`timeout`、`segment_edge`，命令行选项优先。文件不存在就用默认值，v2exe 不会创建它。
+
+`segment_edge` 决定界面里色块的边缘，取 `plain`（默认）或 `powerline`；`powerline` 需要终端字体带 Powerline 符号。
 
 ```toml
 base_url = "https://www.v2ex.com"
 proxy = "socks5://127.0.0.1:1080"
 timeout = 10
+segment_edge = "plain"
 ```
 
 ## 安装
