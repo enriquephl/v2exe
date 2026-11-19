@@ -3,9 +3,14 @@
 use clap::{Parser, Subcommand};
 
 /// V2EX 终端阅读器
+///
+/// 不带子命令时打开互动式界面；带子命令时把结果输出到 stdout 后退出。
 #[derive(Debug, Parser)]
-#[command(version, arg_required_else_help = true)]
+#[command(version)]
 pub struct Cli {
+    /// 打开互动式界面，停在子命令所指的位置
+    #[arg(short = 'i', long, global = true)]
+    pub interactive: bool,
     /// 输出 JSON
     #[arg(long, global = true)]
     pub json: bool,
@@ -132,11 +137,22 @@ mod tests {
     }
 
     #[test]
-    fn bare_invocation_shows_help() {
-        assert_eq!(
-            Cli::try_parse_from(["v2exe"]).unwrap_err().kind(),
-            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-        );
+    fn no_subcommand_parses_and_interactive_is_global() {
+        let bare = Cli::try_parse_from(["v2exe"]).unwrap();
+        assert!(bare.command.is_none() && !bare.interactive);
+
+        for args in [
+            ["v2exe", "-i", "node", "python"],
+            ["v2exe", "node", "python", "-i"],
+            ["v2exe", "--interactive", "node", "python"],
+        ] {
+            let c = Cli::try_parse_from(args).unwrap();
+            assert!(c.interactive, "{args:?}");
+            assert!(
+                matches!(c.command, Some(Command::Node { ref name, .. }) if name == "python"),
+                "{args:?}"
+            );
+        }
     }
 
     #[test]

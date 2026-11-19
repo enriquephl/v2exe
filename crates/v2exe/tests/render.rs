@@ -85,6 +85,34 @@ fn display_width_counts_wide_chars() {
 }
 
 #[test]
+fn variation_selector_makes_a_narrow_emoji_two_columns() {
+    assert_eq!(display_width("❤\u{fe0f}"), 2);
+    assert_eq!(display_width("a\u{fe0f}"), 2);
+    assert_eq!(display_width("中\u{fe0f}"), 2);
+    assert_eq!(display_width("\u{fe0f}"), 0);
+    assert_eq!(
+        texts(&wrap(&render_html("❤\u{fe0f}❤\u{fe0f}"), 2)),
+        vec!["❤\u{fe0f}", "❤\u{fe0f}"]
+    );
+    assert_eq!(
+        texts(&wrap(&render_html("ab❤\u{fe0f}"), 3)),
+        vec!["ab", "❤\u{fe0f}"]
+    );
+}
+
+#[test]
+fn wrap_breaks_after_a_narrow_emoji_like_after_a_wide_one() {
+    assert_eq!(
+        texts(&wrap(&render_html("😀节abc"), 5)),
+        vec!["😀", "节abc"]
+    );
+    assert_eq!(
+        texts(&wrap(&render_html("❤\u{fe0f}节abc"), 5)),
+        vec!["❤\u{fe0f}", "节abc"]
+    );
+}
+
+#[test]
 fn wrap_cjk() {
     assert_eq!(
         texts(&wrap(&render_html("一二三四五"), 6)),
@@ -276,10 +304,49 @@ fn sanitize_drops_control_characters() {
 }
 
 #[test]
+fn sanitize_drops_bidirectional_controls() {
+    let controls: Vec<char> = ['\u{061c}', '\u{200e}', '\u{200f}']
+        .into_iter()
+        .chain('\u{202a}'..='\u{202e}')
+        .chain('\u{2066}'..='\u{2069}')
+        .collect();
+    assert_eq!(controls.len(), 12);
+    for c in controls {
+        assert_eq!(sanitize(&format!("a{c}b")), "ab", "U+{:04X}", u32::from(c));
+    }
+    // A joiner is no bidirectional control: emoji sequences need it.
+    assert_eq!(sanitize("👨\u{200d}👩"), "👨\u{200d}👩");
+}
+
+#[test]
+fn bidirectional_controls_never_reach_rendered_text() {
+    assert_eq!(
+        texts(&render_html("<p>a\u{202e}b\u{2067}c\u{2069}d</p>")),
+        vec!["abcd"]
+    );
+    assert_eq!(
+        texts(&render_html("<p>a\u{061c}b\u{200e}c\u{200f}d</p>")),
+        vec!["abcd"]
+    );
+    assert_eq!(texts(&render_html("<pre>x\u{202d}y</pre>")), vec!["xy"]);
+    assert_eq!(texts(&render_html("<pre>x\u{200f}y</pre>")), vec!["xy"]);
+}
+
+#[test]
 fn sanitize_expands_tabs_to_multiples_of_four_columns() {
     assert_eq!(sanitize("\tx"), "    x");
     assert_eq!(sanitize("ab\tx"), "ab  x");
     assert_eq!(sanitize("中\tx"), "中  x");
+}
+
+#[test]
+fn tab_stops_count_an_emoji_presentation_pair_as_two_columns() {
+    let out = sanitize("❤\u{fe0f}\tX");
+    assert_eq!(out, "❤\u{fe0f}  X");
+    assert_eq!(display_width(&out), 5);
+    // A space from an earlier tab pairs with the selector the same way.
+    let out = sanitize("\t\u{fe0f}\tX");
+    assert_eq!(display_width(&out[..out.len() - 1]), 8);
 }
 
 #[test]

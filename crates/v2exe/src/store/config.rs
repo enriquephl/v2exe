@@ -1,11 +1,19 @@
-//! Settings file `$XDG_CONFIG_HOME/v2exe/config.toml`; a missing file means defaults.
+//! The settings file `config.toml` in the config directory; a missing file means defaults.
 
-use std::ffi::OsStr;
 use std::fmt;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+/// How the colored segments of the interface end.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SegmentEdge {
+    #[default]
+    Plain,
+    Powerline,
+}
 
 /// Settings read from the file. Unknown keys are ignored.
 #[derive(Debug, Default, PartialEq, Deserialize)]
@@ -14,6 +22,8 @@ pub struct Config {
     pub proxy: Option<String>,
     /// Request timeout in seconds.
     pub timeout: Option<u64>,
+    /// `None` means [`SegmentEdge::Plain`].
+    pub segment_edge: Option<SegmentEdge>,
 }
 
 /// The settings file exists but cannot be used.
@@ -30,24 +40,6 @@ impl fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
-
-/// `<xdg_config_home>/v2exe/config.toml` when it is an absolute path, otherwise
-/// `<home>/.config/v2exe/config.toml`.
-pub fn config_path_from(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
-    let base = match xdg_config_home.map(Path::new).filter(|x| x.is_absolute()) {
-        Some(xdg) => xdg.to_path_buf(),
-        None => Path::new(home?).join(".config"),
-    };
-    Some(base.join("v2exe").join("config.toml"))
-}
-
-/// [`config_path_from`] applied to the process environment.
-pub fn config_path() -> Option<PathBuf> {
-    config_path_from(
-        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    )
-}
 
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
     let fail = |reason: String| ConfigError {
@@ -90,14 +82,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = write(
             &tmp,
-            "base_url = \"https://global.v2ex.co\"\nproxy = \"socks5://127.0.0.1:1080\"\ntimeout = 20\n",
+            "base_url = \"https://global.v2ex.co\"\nproxy = \"socks5://127.0.0.1:1080\"\ntimeout = 20\nsegment_edge = \"powerline\"\n",
         );
         assert_eq!(
             load(&p).unwrap(),
             Config {
                 base_url: Some("https://global.v2ex.co".into()),
                 proxy: Some("socks5://127.0.0.1:1080".into()),
-                timeout: Some(20)
+                timeout: Some(20),
+                segment_edge: Some(SegmentEdge::Powerline),
             }
         );
     }
@@ -139,19 +132,22 @@ mod tests {
     }
 
     #[test]
-    fn config_path_rules() {
-        assert_eq!(
-            config_path_from(Some("/x".as_ref()), Some("/h".as_ref())),
-            Some("/x/v2exe/config.toml".into())
+    fn segment_edge_parses_and_rejects_unknown_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write(&tmp, "segment_edge = \"powerline\"\n");
+        assert_eq!(load(&p).unwrap().segment_edge, Some(SegmentEdge::Powerline));
+
+        let p = write(&tmp, "segment_edge = \"plain\"\n");
+        assert_eq!(load(&p).unwrap().segment_edge, Some(SegmentEdge::Plain));
+
+        let p = write(&tmp, "timeout = 5\n");
+        assert_eq!(load(&p).unwrap().segment_edge, None);
+
+        let p = write(&tmp, "segment_edge = \"round\"\n");
+        let e = load(&p).unwrap_err().to_string();
+        assert!(
+            e.contains(&p.display().to_string()) && e.contains("有误"),
+            "{e}"
         );
-        assert_eq!(
-            config_path_from(Some("".as_ref()), Some("/h".as_ref())),
-            Some("/h/.config/v2exe/config.toml".into())
-        );
-        assert_eq!(
-            config_path_from(Some("relative".as_ref()), Some("/h".as_ref())),
-            Some("/h/.config/v2exe/config.toml".into())
-        );
-        assert_eq!(config_path_from(None, None), None);
     }
 }

@@ -96,6 +96,13 @@ impl Transport {
         if let Some(body) = self.cached(path) {
             return Ok(body);
         }
+        let body = self.request(path, kind).await?;
+        self.store(path, body.clone(), ttl);
+        Ok(body)
+    }
+
+    /// Fetches `path` without reading or writing the cache.
+    pub(crate) async fn request(&self, path: &str, kind: Endpoint) -> Result<Bytes> {
         if kind == Endpoint::Api {
             self.check_quota()?;
         }
@@ -104,11 +111,7 @@ impl Transport {
         let mut retries = 0;
         loop {
             match self.attempt(&url, kind).await {
-                Ok(body) => {
-                    lock(&self.inner.cache)
-                        .insert(path.to_string(), (Instant::now() + ttl, body.clone()));
-                    return Ok(body);
-                }
+                Ok(body) => return Ok(body),
                 Err(Failure::Retry(_)) if retries < MAX_RETRIES => {
                     retries += 1;
                     tokio::time::sleep(BACKOFF_STEP * retries).await;
@@ -118,7 +121,16 @@ impl Transport {
         }
     }
 
-    /// The quota reported by the most recent `Api` response.
+    /// Caches `body` under `path` for `ttl`, replacing an earlier entry and dropping every entry
+    /// that has expired.
+    pub(crate) fn store(&self, path: &str, body: Bytes, ttl: Duration) {
+        let now = Instant::now();
+        let mut cache = lock(&self.inner.cache);
+        cache.retain(|_, (expires, _)| *expires > now);
+        cache.insert(path.to_string(), (now + ttl, body));
+    }
+
+    /// The quota reported by the most recent `Api` response whose reset time had not passed.
     pub(crate) fn rate_limit(&self) -> Option<RateLimit> {
         lock(&self.inner.rate_limit).clone()
     }
@@ -132,7 +144,8 @@ impl Transport {
         lock(&self.inner.cache).remove(path);
     }
 
-    fn cached(&self, path: &str) -> Option<Bytes> {
+    /// The body cached under `path`, unless it has expired.
+    pub(crate) fn cached(&self, path: &str) -> Option<Bytes> {
         let mut cache = lock(&self.inner.cache);
         match cache.get(path) {
             Some((expires, body)) if *expires > Instant::now() => Some(body.clone()),
@@ -165,8 +178,11 @@ impl Transport {
         let status = resp.status();
         let headers = resp.headers();
 
+        // A copy served from the site's CDN carries the headers of the moment it was cached, with
+        // a reset time that may have passed; only a reset still ahead describes the live quota.
         if kind == Endpoint::Api
             && let Some(rl) = rate_limit_from(headers)
+            && rl.reset > Utc::now()
         {
             *lock(&self.inner.rate_limit) = Some(rl);
         }
@@ -199,7 +215,8 @@ impl Transport {
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+/// Locks `mutex`, ignoring poisoning.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -241,10 +258,13 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::{Endpoint, Settings, Transport};
+    use super::{Endpoint, Settings, Transport, lock};
     use crate::{Error, RateLimit};
 
     const TTL: Duration = Duration::from_secs(60);
+
+    /// 2100-01-01T00:00:00Z: a reset time that is still ahead.
+    const LATER: i64 = 4_102_444_800;
 
     fn settings(base_url: String) -> Settings {
         Settings {
@@ -341,11 +361,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn storing_an_entry_drops_expired_ones() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let t = transport(&server);
+
+        t.get("/a", Endpoint::Feed, Duration::ZERO).await.unwrap();
+        t.get("/b", Endpoint::Feed, TTL).await.unwrap();
+
+        assert_eq!(lock(&t.inner.cache).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn request_bypasses_the_cache_and_leaves_its_entry() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("old"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("new"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let t = transport(&server);
+
+        t.get("/a", Endpoint::Feed, TTL).await.unwrap();
+        let requested = t.request("/a", Endpoint::Feed).await.unwrap();
+        let cached = t.get("/a", Endpoint::Feed, TTL).await.unwrap();
+
+        assert_eq!(&requested[..], b"new");
+        assert_eq!(&cached[..], b"old");
+    }
+
+    #[tokio::test]
     async fn records_rate_limit_headers() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/x"))
-            .respond_with(quota(ResponseTemplate::new(200), 571, 1795060800))
+            .respond_with(quota(ResponseTemplate::new(200), 571, LATER))
             .mount(&server)
             .await;
         let t = transport(&server);
@@ -358,9 +420,39 @@ mod tests {
             Some(RateLimit {
                 limit: 600,
                 remaining: 571,
-                reset: Utc.timestamp_opt(1795060800, 0).unwrap(),
+                reset: Utc.timestamp_opt(LATER, 0).unwrap(),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn headers_whose_reset_has_passed_leave_the_record() {
+        let server = MockServer::start().await;
+        let now = Utc::now().timestamp();
+        for (route, remaining, reset) in [
+            ("/api/live", 571, now + 3600),
+            ("/api/stale", 598, now - 600),
+            ("/api/next", 570, now + 1800),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(route))
+                .respond_with(quota(ResponseTemplate::new(200), remaining, reset))
+                .mount(&server)
+                .await;
+        }
+        let t = transport(&server);
+        let record = |remaining, reset| RateLimit {
+            limit: 600,
+            remaining,
+            reset: Utc.timestamp_opt(reset, 0).unwrap(),
+        };
+
+        t.get("/api/live", Endpoint::Api, TTL).await.unwrap();
+        t.get("/api/stale", Endpoint::Api, TTL).await.unwrap();
+        assert_eq!(t.rate_limit(), Some(record(571, now + 3600)));
+
+        t.get("/api/next", Endpoint::Api, TTL).await.unwrap();
+        assert_eq!(t.rate_limit(), Some(record(570, now + 1800)));
     }
 
     #[tokio::test]
@@ -368,7 +460,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/feed/x"))
-            .respond_with(quota(ResponseTemplate::new(200), 571, 1795060800))
+            .respond_with(quota(ResponseTemplate::new(200), 571, LATER))
             .mount(&server)
             .await;
         let t = transport(&server);
@@ -431,13 +523,6 @@ mod tests {
     #[tokio::test]
     async fn exhausted_quota_past_reset_sends_request() {
         let server = MockServer::start().await;
-        let reset = Utc::now().timestamp() - 10;
-        Mock::given(method("GET"))
-            .and(path("/api/a"))
-            .respond_with(quota(ResponseTemplate::new(200), 0, reset))
-            .expect(1)
-            .mount(&server)
-            .await;
         Mock::given(method("GET"))
             .and(path("/api/b"))
             .respond_with(ResponseTemplate::new(200))
@@ -445,8 +530,13 @@ mod tests {
             .mount(&server)
             .await;
         let t = transport(&server);
+        // A used-up quota whose reset time has passed since it was recorded.
+        *lock(&t.inner.rate_limit) = Some(RateLimit {
+            limit: 600,
+            remaining: 0,
+            reset: Utc::now() - chrono::Duration::seconds(10),
+        });
 
-        t.get("/api/a", Endpoint::Api, TTL).await.unwrap();
         t.get("/api/b", Endpoint::Api, TTL).await.unwrap();
     }
 
@@ -491,7 +581,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/a"))
-            .respond_with(quota(ResponseTemplate::new(403), 5, 1795060800))
+            .respond_with(quota(ResponseTemplate::new(403), 5, LATER))
             .expect(1)
             .mount(&server)
             .await;
@@ -507,7 +597,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/a"))
-            .respond_with(quota(ResponseTemplate::new(404), 570, 1795060800))
+            .respond_with(quota(ResponseTemplate::new(404), 570, LATER))
             .expect(1)
             .mount(&server)
             .await;

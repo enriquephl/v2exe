@@ -50,26 +50,62 @@ impl Line {
 }
 
 /// Display width in terminal columns: CJK characters and emoji count 2,
-/// combining and control characters 0.
+/// combining and control characters 0. A one-column character followed by U+FE0F
+/// (emoji presentation) counts 2.
 pub fn display_width(s: &str) -> usize {
-    s.chars().map(char_width).sum()
+    cell_widths(s.chars()).sum()
 }
 
 fn char_width(c: char) -> usize {
     c.width().unwrap_or(0)
 }
 
-/// Drops control characters (C0, DEL, C1) and expands tabs to the next multiple
-/// of 4 columns, counted from the start of `s`.
+/// Emoji variation selector: asks for the preceding character to be drawn as a two-column emoji.
+const EMOJI_PRESENTATION: char = '\u{fe0f}';
+
+/// Column width of each character; the width of an emoji presentation pair sits on the first
+/// character and the selector counts 0.
+fn cell_widths(chars: impl Iterator<Item = char>) -> impl Iterator<Item = usize> {
+    let mut chars = chars.peekable();
+    std::iter::from_fn(move || {
+        let c = chars.next()?;
+        let w = char_width(c);
+        Some(if w == 1 && chars.peek() == Some(&EMOJI_PRESENTATION) {
+            2
+        } else {
+            w
+        })
+    })
+}
+
+/// Whether `c` never reaches the terminal: a control character (C0, DEL, C1), or a
+/// bidirectional control (the marks U+061C, U+200E and U+200F; the embeddings, overrides and
+/// isolates U+202A–U+202E and U+2066–U+2069), which reorders the text around it on terminals
+/// that implement bidi.
+fn is_dropped(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        )
+}
+
+/// Drops control characters (C0, DEL, C1) and bidirectional controls, and expands tabs to the
+/// next multiple of 4 columns, counted from the start of `s` as [`display_width`] counts them.
 pub fn sanitize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
+    // `display_width(&out)`, kept as `out` grows.
     let mut col = 0;
     for c in s.chars() {
         if c == '\t' {
             let n = 4 - col % 4;
             out.extend(std::iter::repeat_n(' ', n));
             col += n;
-        } else if !c.is_control() {
+        } else if !is_dropped(c) {
+            // The selector turns the one-column character before it into a two-column pair.
+            if c == EMOJI_PRESENTATION && out.chars().next_back().map(char_width) == Some(1) {
+                col += 1;
+            }
             out.push(c);
             col += char_width(c);
         }
@@ -91,9 +127,9 @@ pub fn render_html(html: &str) -> Vec<Line> {
 
 /// Wraps lines to at most `width.max(2)` columns.
 ///
-/// Breaks at the last space (dropped), between two CJK characters, or hard at
-/// the limit when neither exists. Every piece keeps the line's kind and the
-/// roles of its segments.
+/// Breaks at the last space (dropped), between two double-width characters, or hard at
+/// the limit when neither exists; an emoji presentation pair is never split. Every piece
+/// keeps the line's kind and the roles of its segments.
 pub fn wrap(lines: &[Line], width: usize) -> Vec<Line> {
     let width = width.max(2);
     let mut out = Vec::new();
@@ -114,10 +150,9 @@ fn wrap_line(line: &Line, width: usize, out: &mut Vec<Line>) {
         .enumerate()
         .flat_map(|(i, s)| s.text.chars().map(move |c| (c, i)))
         .collect();
-    let cells_width =
-        |cells: &[(char, usize)]| -> usize { cells.iter().map(|(c, _)| char_width(*c)).sum() };
+    let widths: Vec<usize> = cell_widths(cells.iter().map(|&(c, _)| c)).collect();
     // Width of everything from `start` on.
-    let mut rest = cells_width(&cells);
+    let mut rest: usize = widths.iter().sum();
     let mut start = 0;
     while start < cells.len() {
         if rest <= width {
@@ -129,14 +164,20 @@ fn wrap_line(line: &Line, width: usize, out: &mut Vec<Line>) {
         let mut i = start;
         let (end, next) = loop {
             let c = cells[i].0;
+            let cw = widths[i];
             if i > start {
+                // The width of an emoji presentation pair sits on the character before the selector.
+                let prev = if cells[i - 1].0 == EMOJI_PRESENTATION && i >= 2 {
+                    widths[i - 2]
+                } else {
+                    widths[i - 1]
+                };
                 if c == ' ' {
                     brk = Some((i, i + 1));
-                } else if char_width(c) == 2 && char_width(cells[i - 1].0) == 2 {
+                } else if cw == 2 && prev == 2 {
                     brk = Some((i, i));
                 }
             }
-            let cw = char_width(c);
             if w + cw > width {
                 break brk.unwrap_or((i, i));
             }
@@ -144,7 +185,7 @@ fn wrap_line(line: &Line, width: usize, out: &mut Vec<Line>) {
             i += 1;
         };
         out.push(piece(line, &cells[start..end]));
-        rest -= cells_width(&cells[start..next]);
+        rest -= widths[start..next].iter().sum::<usize>();
         start = next;
     }
 }
@@ -291,7 +332,7 @@ impl Renderer {
     }
 
     /// Adds text with whitespace runs collapsed to one space and other control
-    /// characters dropped.
+    /// characters, bidirectional ones included, dropped.
     fn push_text(&mut self, raw: &str, role: Role) {
         let mut text = String::new();
         let mut at_space = self.at_space;
@@ -301,7 +342,7 @@ impl Renderer {
                     text.push(' ');
                 }
                 at_space = true;
-            } else if !c.is_control() {
+            } else if !is_dropped(c) {
                 text.push(c);
                 at_space = false;
             }

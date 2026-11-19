@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use v2ex_rs::{Client, Error, Listing, Topic};
 use wiremock::matchers::{any, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -245,7 +247,196 @@ async fn plain_tab_drops_recent_restricted_ids_and_skips_failed_sources() {
 }
 
 #[tokio::test]
-async fn restricted_ids_are_fetched_once_across_tab_listings() {
+async fn restricted_ids_are_refetched_with_each_fresh_tab_feed() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .expect(1)
+        .mount(&server)
+        .await;
+    serve("/feed/tab/tech.xml", &[], TAB_FEED)
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_restricted_sources(&server, 2).await;
+    let client = client(&server);
+
+    // The first two fetch their feed afresh; the third reads its feed from the cache and so
+    // reuses the kept ids.
+    client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+    client
+        .topics(&Listing::Tab("tech".into()), 1)
+        .await
+        .unwrap();
+    client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_tab_loads_both_wait_for_the_restricted_ids() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .expect(1)
+        .mount(&server)
+        .await;
+    serve(
+        "/api/topics/show.json",
+        &[("node_name", "flamewar")],
+        TOPICS,
+    )
+    .mount(&server)
+    .await;
+    // The nsfw feed lists topic 4001, which `TAB_FEED` also lists, and answers late.
+    Mock::given(method("GET"))
+        .and(path("/feed/nsfw.xml"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(NODE_FEED.replace("/t/2001#", "/t/4001#"))
+                .set_delay(Duration::from_millis(500)),
+        )
+        .mount(&server)
+        .await;
+    serve("/feed/sandbox.xml", &[], NODE_FEED)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+    let listing = Listing::Tab("all".into());
+
+    // The second load starts while the first waits for the nsfw feed.
+    let (first, second) = tokio::join!(client.topics(&listing, 1), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        client.topics(&listing, 1).await
+    });
+
+    assert_eq!(ids(&first.unwrap().items), vec![4002]);
+    assert_eq!(ids(&second.unwrap().items), vec![4002]);
+}
+
+#[tokio::test]
+async fn a_tab_load_dropped_before_its_restricted_ids_arrive_caches_nothing() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .expect(2)
+        .mount(&server)
+        .await;
+    serve(
+        "/api/topics/show.json",
+        &[("node_name", "flamewar")],
+        TOPICS,
+    )
+    .mount(&server)
+    .await;
+    // The nsfw feed lists topic 4001, which `TAB_FEED` also lists, and answers late.
+    Mock::given(method("GET"))
+        .and(path("/feed/nsfw.xml"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(NODE_FEED.replace("/t/2001#", "/t/4001#"))
+                .set_delay(Duration::from_millis(300)),
+        )
+        .mount(&server)
+        .await;
+    serve("/feed/sandbox.xml", &[], NODE_FEED)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+    let listing = Listing::Tab("all".into());
+
+    // Given up on while it waits for the nsfw feed.
+    let dropped =
+        tokio::time::timeout(Duration::from_millis(100), client.topics(&listing, 1)).await;
+    assert!(dropped.is_err());
+    let p = client.topics(&listing, 1).await.unwrap();
+
+    assert_eq!(ids(&p.items), vec![4002]);
+}
+
+/// Mounts the three restricted-node sources. The nsfw feed lists topic 4001, which `TAB_FEED`
+/// also lists; it answers once with that feed and then with `later`.
+async fn mount_restricted_sources_with_nsfw_then(server: &MockServer, later: ResponseTemplate) {
+    serve(
+        "/api/topics/show.json",
+        &[("node_name", "flamewar")],
+        TOPICS,
+    )
+    .mount(server)
+    .await;
+    serve(
+        "/feed/nsfw.xml",
+        &[],
+        &NODE_FEED.replace("/t/2001#", "/t/4001#"),
+    )
+    .up_to_n_times(1)
+    .expect(1)
+    .mount(server)
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/feed/nsfw.xml"))
+        .respond_with(later)
+        .expect(1..)
+        .mount(server)
+        .await;
+    serve("/feed/sandbox.xml", &[], NODE_FEED)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn ids_kept_before_clear_cache_filter_while_the_nsfw_source_fails() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .expect(2)
+        .mount(&server)
+        .await;
+    mount_restricted_sources_with_nsfw_then(&server, ResponseTemplate::new(500)).await;
+    let client = client(&server);
+
+    let first = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+    client.clear_cache();
+    let second = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+
+    assert_eq!(ids(&first.items), vec![4002]);
+    assert_eq!(ids(&second.items), vec![4002]);
+}
+
+#[tokio::test]
+async fn ids_kept_before_clear_cache_filter_while_the_flamewar_source_is_rate_limited() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .expect(2)
+        .mount(&server)
+        .await;
+    // `TOPICS` lists topic 1002, which `TAB_FEED` also lists.
+    serve(
+        "/api/topics/show.json",
+        &[("node_name", "flamewar")],
+        TOPICS,
+    )
+    .up_to_n_times(1)
+    .expect(1)
+    .mount(&server)
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/api/topics/show.json"))
+        .and(query_param("node_name", "flamewar"))
+        .respond_with(ResponseTemplate::new(429))
+        .expect(1)
+        .mount(&server)
+        .await;
+    serve("/feed/nsfw.xml", &[], NODE_FEED).mount(&server).await;
+    serve("/feed/sandbox.xml", &[], NODE_FEED)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+
+    let first = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+    client.clear_cache();
+    let second = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+
+    assert_eq!(ids(&first.items), vec![4001, 4002]);
+    assert_eq!(ids(&second.items), vec![4001, 4002]);
+}
+
+#[tokio::test]
+async fn failed_refetch_of_a_restricted_source_keeps_its_ids() {
     let server = MockServer::start().await;
     serve("/feed/tab/all.xml", &[], TAB_FEED)
         .mount(&server)
@@ -253,14 +444,102 @@ async fn restricted_ids_are_fetched_once_across_tab_listings() {
     serve("/feed/tab/tech.xml", &[], TAB_FEED)
         .mount(&server)
         .await;
-    mount_restricted_sources(&server, 1).await;
+    mount_restricted_sources_with_nsfw_then(&server, ResponseTemplate::new(500)).await;
     let client = client(&server);
 
-    client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
-    client
+    let first = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+    let second = client
         .topics(&Listing::Tab("tech".into()), 1)
         .await
         .unwrap();
+
+    assert_eq!(ids(&first.items), vec![4002]);
+    assert_eq!(ids(&second.items), vec![4002]);
+}
+
+#[tokio::test]
+async fn a_restricted_id_stays_known_after_its_source_stops_listing_it() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .expect(1)
+        .mount(&server)
+        .await;
+    serve("/feed/tab/tech.xml", &[], TAB_FEED)
+        .expect(1)
+        .mount(&server)
+        .await;
+    // Topic 4001 has rolled off the nsfw feed by the second request.
+    mount_restricted_sources_with_nsfw_then(
+        &server,
+        ResponseTemplate::new(200).set_body_string(NODE_FEED),
+    )
+    .await;
+    let client = client(&server);
+
+    let first = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+    let fresh = client
+        .topics(&Listing::Tab("tech".into()), 1)
+        .await
+        .unwrap();
+    // From the cache, still listing 4001.
+    let cached = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+
+    assert_eq!(ids(&first.items), vec![4002]);
+    assert_eq!(ids(&cached.items), vec![4002]);
+    assert_eq!(ids(&fresh.items), vec![4002]);
+}
+
+#[tokio::test]
+async fn unparseable_refetch_of_a_restricted_source_keeps_its_ids() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .mount(&server)
+        .await;
+    serve("/feed/tab/tech.xml", &[], TAB_FEED)
+        .mount(&server)
+        .await;
+    mount_restricted_sources_with_nsfw_then(
+        &server,
+        ResponseTemplate::new(200).set_body_string("<html>busy</html>"),
+    )
+    .await;
+    let client = client(&server);
+
+    client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+    let fresh = client
+        .topics(&Listing::Tab("tech".into()), 1)
+        .await
+        .unwrap();
+    // This feed comes from the cache, so the ids are not fetched again: the ids kept from the
+    // first nsfw feed do the filtering. The nsfw feed is requested twice in total, once for
+    // `all` and once for the refresh behind `tech`.
+    let cached = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+
+    assert_eq!(ids(&fresh.items), vec![4002]);
+    assert_eq!(ids(&cached.items), vec![4002]);
+    let nsfw_requests = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == "/feed/nsfw.xml")
+        .count();
+    assert_eq!(nsfw_requests, 2);
+}
+
+#[tokio::test]
+async fn unknown_tab_is_not_found_and_not_cached() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/zzzz.xml", &[], "")
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+
+    for _ in 0..2 {
+        let result = client.topics(&Listing::Tab("zzzz".into()), 1).await;
+        assert!(matches!(result, Err(Error::NotFound)), "{result:?}");
+    }
 }
 
 #[tokio::test]
@@ -442,7 +721,8 @@ async fn rate_limit_is_exposed() {
                 .set_body_string(TOPICS)
                 .insert_header("x-rate-limit-limit", "600")
                 .insert_header("x-rate-limit-remaining", "571")
-                .insert_header("x-rate-limit-reset", "1795060800"),
+                // 2100-01-01: a reset time that is still ahead.
+                .insert_header("x-rate-limit-reset", "4102444800"),
         )
         .mount(&server)
         .await;

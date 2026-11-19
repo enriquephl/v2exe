@@ -1,20 +1,22 @@
-//! The non-interactive flow: settings, client, one subcommand, output.
+//! The non-interactive flow: settings, client, one subcommand, output. The interactive mode
+//! takes its settings and client from [`settings`] too.
 
 use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{FixedOffset, Local};
-use clap::CommandFactory;
-use v2ex_rs::{Client, Listing, Node};
+use v2ex_rs::{Client, ClientBuilder, Listing, Node};
 
 use super::args::{Cli, Command};
-use super::exit::{exit_code, message};
+use super::exit::exit_code;
 use super::output::{self, Painter};
 use super::topic_ref::parse_topic_ref;
-use crate::config::{self, Config};
+use crate::errors::message;
 use crate::render::sanitize;
+use crate::store::config::{self, Config, ConfigError, SegmentEdge};
+use crate::store::paths::Dirs;
 
 /// What the process environment decides: where the settings file is, whether to color and wrap
 /// the text, and the offset times are shown in.
@@ -32,7 +34,9 @@ impl RunEnv {
     pub fn from_process() -> RunEnv {
         let tty = io::stdout().is_terminal();
         RunEnv {
-            config_path: config::config_path(),
+            config_path: Dirs::from_process()
+                .config
+                .map(|dir| dir.join("config.toml")),
             color: color_enabled(tty, std::env::var_os("NO_COLOR").as_deref()),
             width: tty
                 .then(|| crossterm::terminal::size().ok())
@@ -57,7 +61,7 @@ pub struct Failure {
 }
 
 impl Failure {
-    fn new(code: u8, message: impl Into<String>) -> Failure {
+    pub fn new(code: u8, message: impl Into<String>) -> Failure {
         Failure {
             code,
             message: message.into(),
@@ -70,43 +74,63 @@ impl Failure {
     }
 }
 
-/// Runs the subcommand and writes its output to `out`. A closed `out` ends the run quietly.
-pub async fn run(cli: Cli, out: &mut dyn Write, env: &RunEnv) -> Result<(), Failure> {
-    let Cli {
-        json,
-        no_color,
-        base_url,
-        proxy,
-        timeout,
-        command,
-    } = cli;
-    let Some(command) = command else {
-        let help = Cli::command().render_help();
-        return Err(Failure::new(2, format!("缺少子命令\n\n{help}")));
-    };
+/// What the settings file, the flags and the process environment decide, for either mode.
+pub struct Settings {
+    pub client: Client,
+    /// Off under `--no-color`, or when the environment turns colors off.
+    pub color: bool,
+    pub edge: SegmentEdge,
+}
 
+/// Reads the settings file and builds the client from it with the flags over its values. A file
+/// that cannot be used fails with code 1, and so does a bad `base_url` or `proxy` in it even
+/// when a flag overrides that value.
+pub fn settings(cli: &Cli, env: &RunEnv) -> Result<Settings, Failure> {
     let config = match &env.config_path {
         Some(path) => config::load(path).map_err(|e| Failure::new(1, e.to_string()))?,
         None => Config::default(),
     };
-    let mut builder = Client::builder().user_agent(concat!("v2exe/", env!("CARGO_PKG_VERSION")));
-    if let Some(url) = base_url.or(config.base_url) {
-        builder = builder.base_url(url);
-    }
-    if let Some(url) = proxy.or(config.proxy) {
-        builder = builder.proxy(url);
-    }
-    if let Some(secs) = timeout.or(config.timeout) {
-        builder = builder.timeout(Duration::from_secs(secs));
-    }
-    let session = Session {
-        client: builder
+    if let Some(path) = &env.config_path
+        && (config.base_url.is_some() || config.proxy.is_some())
+    {
+        // A bad value in the file is the file's fault even when a flag overrides it.
+        client_builder(config.base_url.clone(), config.proxy.clone(), None)
             .build()
-            .map_err(|e| Failure::from_error(&e, &env.tz))?,
-        json,
-        painter: Painter {
-            color: env.color && !no_color,
-        },
+            .map_err(|e| Failure::new(1, config_error(path, &e, &env.tz).to_string()))?;
+    }
+    let client = client_builder(
+        cli.base_url.clone().or(config.base_url),
+        cli.proxy.clone().or(config.proxy),
+        cli.timeout.or(config.timeout),
+    )
+    .build()
+    .map_err(|e| Failure::from_error(&e, &env.tz))?;
+    Ok(Settings {
+        client,
+        color: env.color && !cli.no_color,
+        edge: config.segment_edge.unwrap_or_default(),
+    })
+}
+
+/// The topic id in a reference given on the command line; anything else is a usage error.
+pub fn topic_id(reference: &str) -> Result<u64, Failure> {
+    parse_topic_ref(reference)
+        .ok_or_else(|| Failure::new(2, format!("无法识别的帖子：{reference}")))
+}
+
+/// Runs `command` with the settings of `cli` and writes its output to `out`. A closed `out`
+/// ends the run quietly.
+pub async fn run(
+    command: Command,
+    cli: &Cli,
+    out: &mut dyn Write,
+    env: &RunEnv,
+) -> Result<(), Failure> {
+    let Settings { client, color, .. } = settings(cli, env)?;
+    let session = Session {
+        client,
+        json: cli.json,
+        painter: Painter { color },
         env,
     };
 
@@ -122,6 +146,35 @@ pub async fn run(cli: Cli, out: &mut dyn Write, env: &RunEnv) -> Result<(), Fail
         Command::Nodes { keyword, limit } => session.nodes(keyword.as_deref(), limit).await?,
     };
     write_out(out, &text)
+}
+
+fn client_builder(
+    base_url: Option<String>,
+    proxy: Option<String>,
+    timeout: Option<u64>,
+) -> ClientBuilder {
+    let mut builder = Client::builder().user_agent(concat!("v2exe/", env!("CARGO_PKG_VERSION")));
+    if let Some(url) = base_url {
+        builder = builder.base_url(url);
+    }
+    if let Some(url) = proxy {
+        builder = builder.proxy(url);
+    }
+    if let Some(secs) = timeout {
+        builder = builder.timeout(Duration::from_secs(secs));
+    }
+    builder
+}
+
+/// A library error caused by a value read from the settings file at `path`.
+fn config_error(path: &Path, e: &v2ex_rs::Error, tz: &FixedOffset) -> ConfigError {
+    ConfigError {
+        path: path.to_path_buf(),
+        reason: match e {
+            v2ex_rs::Error::Config(reason) => reason.clone(),
+            other => message(other, tz),
+        },
+    }
 }
 
 struct Session<'a> {
@@ -150,8 +203,7 @@ impl Session<'_> {
     }
 
     async fn topic(&self, reference: &str, no_replies: bool) -> Result<String, Failure> {
-        let id = parse_topic_ref(reference)
-            .ok_or_else(|| Failure::new(2, format!("无法识别的帖子：{reference}")))?;
+        let id = topic_id(reference)?;
         let topic = self.client.topic(id).await.map_err(|e| self.failure(&e))?;
         let replies = if no_replies {
             None

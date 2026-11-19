@@ -1,13 +1,14 @@
 //! The public entry point: which source serves each call, and the restricted-node rules.
 
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, PercentEncode, utf8_percent_encode};
 
 use crate::feed::{self, FeedKind};
-use crate::http::{Endpoint, Settings, Transport};
-use crate::restricted::{self, IdSource};
+use crate::http::{Endpoint, Settings, Transport, lock};
+use crate::restricted::{self, IdSource, RestrictedNode};
 use crate::{Error, Listing, Node, Page, RateLimit, Reply, Result, Topic, api1};
 
 const DEFAULT_BASE_URL: &str = "https://www.v2ex.com";
@@ -17,7 +18,6 @@ const TOPICS_TTL: Duration = Duration::from_secs(120);
 const REPLIES_TTL: Duration = Duration::from_secs(60);
 const NODE_TTL: Duration = Duration::from_secs(3600);
 const NODES_TTL: Duration = Duration::from_secs(7200);
-const RESTRICTED_IDS_TTL: Duration = Duration::from_secs(600);
 
 const NAME_ESCAPES: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -25,10 +25,20 @@ const NAME_ESCAPES: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
-/// Cheap to clone; clones share one connection pool, cache and quota record.
+/// Cheap to clone; clones share one connection pool, cache, quota record and set of restricted
+/// ids, and take turns at tab listings.
 #[derive(Clone)]
 pub struct Client {
     transport: Transport,
+    /// Every topic id a restricted node's source has listed since the client was built: each
+    /// fetch of a source that succeeds adds its ids, and none is ever removed, so a feed cached
+    /// while a topic was recent is filtered after the topic leaves its node's recent list. Kept
+    /// apart from the response cache: [`Client::clear_cache`] leaves them, and they do not
+    /// expire.
+    restricted_ids: Arc<Mutex<HashSet<u64>>>,
+    /// Held for the whole of a tab listing (feed, id refetch, filtering), so tab listings run
+    /// one at a time and each filters with the ids that go with its feed.
+    tab_turn: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub struct ClientBuilder {
@@ -127,12 +137,14 @@ impl Client {
         Ok(nodes)
     }
 
-    /// The quota reported by the most recent API response.
+    /// The quota reported by the most recent API response whose reset time had not passed. A
+    /// copy served from the site's CDN carries the headers of the moment it was cached.
     pub fn rate_limit(&self) -> Option<RateLimit> {
         self.transport.rate_limit()
     }
 
-    /// Drops every cached response, so the next calls fetch afresh.
+    /// Drops every cached response, so the next calls fetch afresh. The ids kept for the
+    /// restricted nodes stay.
     pub fn clear_cache(&self) {
         self.transport.clear_cache();
     }
@@ -145,14 +157,27 @@ impl Client {
                     .await?
             }
             Listing::Tab(tab) => {
+                let _turn = self.tab_turn.lock().await;
                 // Only the hot tab names each topic's node, in a title prefix.
                 let (path, kind) = if tab.eq_ignore_ascii_case("hot") {
                     ("/feed/tab/hot.xml".to_string(), FeedKind::Prefixed)
                 } else {
                     (format!("/feed/tab/{}.xml", encode(tab)), FeedKind::Plain)
                 };
-                let mut topics = self.feed_topics(&path, &kind, TOPICS_TTL).await?;
-                let hidden = self.restricted_ids().await;
+                // A fresh feed enters the cache only once the ids that go with it are kept, so a
+                // load dropped in between leaves nothing behind and the next one starts over. A
+                // cached feed reuses the kept ids without a request.
+                let mut topics = match self.transport.cached(&path) {
+                    Some(body) => parse_feed_body(&body, &kind)?,
+                    None => {
+                        let body = self.transport.request(&path, Endpoint::Feed).await?;
+                        let topics = parse_feed_body(&body, &kind)?;
+                        self.refetch_restricted_ids().await;
+                        self.transport.store(&path, body, TOPICS_TTL);
+                        topics
+                    }
+                };
+                let hidden = lock(&self.restricted_ids);
                 topics.retain(|t| !hidden.contains(&t.id));
                 topics
             }
@@ -176,28 +201,35 @@ impl Client {
         Ok(topics)
     }
 
-    /// The ids of the recent topics of every restricted node. A source that fails is skipped.
-    async fn restricted_ids(&self) -> HashSet<u64> {
-        let mut ids = HashSet::new();
+    /// Fetches the source of every restricted node: a fetch that succeeds adds its ids to the
+    /// kept ones, and one that fails adds none.
+    async fn refetch_restricted_ids(&self) {
         for node in restricted::RESTRICTED {
-            let topics = match node.source {
-                IdSource::Api => {
-                    let path = format!("/api/topics/show.json?node_name={}", encode(node.name));
-                    self.api_topics(&path, RESTRICTED_IDS_TTL).await
-                }
-                IdSource::Feed => self.node_feed(node.name, RESTRICTED_IDS_TTL).await,
-            };
-            if let Ok(topics) = topics {
-                ids.extend(topics.iter().map(|t| t.id));
+            if let Ok(topics) = self.id_source_topics(node).await {
+                lock(&self.restricted_ids).extend(topics.iter().map(|t| t.id));
             }
         }
-        ids
+    }
+
+    /// The recent topics of a restricted node, fetched without the response cache.
+    async fn id_source_topics(&self, node: &RestrictedNode) -> Result<Vec<Topic>> {
+        match node.source {
+            IdSource::Api => {
+                let path = format!("/api/topics/show.json?node_name={}", encode(node.name));
+                let body = self.transport.request(&path, Endpoint::Api).await?;
+                api1::parse_topics(&body)
+            }
+            IdSource::Feed => {
+                let path = node_feed_path(node.name);
+                let body = self.transport.request(&path, Endpoint::Feed).await?;
+                parse_feed_body(&body, &FeedKind::Node(node.name.to_string()))
+            }
+        }
     }
 
     async fn node_feed(&self, name: &str, ttl: Duration) -> Result<Vec<Topic>> {
-        let path = format!("/feed/{}.xml", encode(name));
-        self.feed_topics(&path, &FeedKind::Node(name.to_string()), ttl)
-            .await
+        let kind = FeedKind::Node(name.to_string());
+        self.feed_topics(&node_feed_path(name), &kind, ttl).await
     }
 
     async fn api_topics(&self, path: &str, ttl: Duration) -> Result<Vec<Topic>> {
@@ -207,7 +239,7 @@ impl Client {
 
     async fn feed_topics(&self, path: &str, kind: &FeedKind, ttl: Duration) -> Result<Vec<Topic>> {
         self.fetch(path, Endpoint::Feed, ttl, |body| {
-            feed::parse_feed(body, kind)
+            parse_feed_body(body, kind)
         })
         .await
     }
@@ -256,8 +288,22 @@ impl ClientBuilder {
     pub fn build(self) -> Result<Client> {
         Ok(Client {
             transport: Transport::new(&self.settings)?,
+            restricted_ids: Arc::default(),
+            tab_turn: Arc::default(),
         })
     }
+}
+
+fn node_feed_path(name: &str) -> String {
+    format!("/feed/{}.xml", encode(name))
+}
+
+/// Parses a feed body. The site answers a tab it does not have with 200 and an empty body.
+fn parse_feed_body(body: &[u8], kind: &FeedKind) -> Result<Vec<Topic>> {
+    if body.is_empty() {
+        return Err(Error::NotFound);
+    }
+    feed::parse_feed(body, kind)
 }
 
 /// Escapes everything but the RFC 3986 unreserved characters, so a name stays inside the path
