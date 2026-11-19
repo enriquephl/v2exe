@@ -10,11 +10,12 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use v2ex_rs::{Listing, Node};
 
-use super::app::{App, Cmd, Screen, hint, segment};
+use super::app::{App, Cmd, Screen, ask_directory, hint, segment};
 use super::frame::{Chrome, Tone, draw_frame};
 use super::list::{ListNav, Nav};
 use super::prompt::{Prompt, PromptKey};
 use super::theme::{Paint, Theme};
+use super::topics::{GOTO, goto_hints};
 use crate::render::sanitize;
 use crate::store::config::SegmentEdge;
 use crate::store::favorites::{Favorite, Favorites, TABS, listing_title};
@@ -34,12 +35,10 @@ pub struct NodesScreen {
     pub nav: ListNav,
     /// Rows are kept when their name or title contains this, ignoring case.
     pub filter: Option<String>,
-    /// The filter being typed.
+    /// The filter or the goto input being typed.
     pub prompt: Option<Prompt>,
     /// The favorite under the cursor moves with the up and down keys.
     pub moving: bool,
-    /// The node directory has been asked for and has not arrived.
-    pub loading: bool,
 }
 
 /// One line of the list.
@@ -155,12 +154,14 @@ impl NodesScreen {
         vec![Cmd::SaveFavorites]
     }
 
-    /// The keys of the node list that are not list keys: `y`, `a`, `d`, `M`, `/` and `r`.
+    /// The keys of the node list that are not list keys: `y`, `a`, `d`, `M`, `/`, `s` and `r`.
+    /// `loading` is whether the node directory is on its way.
     fn command(
         &mut self,
         key: KeyEvent,
         favorites: &mut Favorites,
         directory: Option<&[Node]>,
+        loading: &mut bool,
         page: usize,
     ) -> Vec<Cmd> {
         if key
@@ -179,14 +180,12 @@ impl NodesScreen {
                 };
                 *self = NodesScreen {
                     view,
-                    loading: self.loading,
                     ..NodesScreen::default()
                 };
-                if view == NodesView::All && directory.is_none() && !self.loading {
-                    self.loading = true;
-                    return vec![Cmd::LoadDirectory { refresh: false }];
+                match view {
+                    NodesView::All => ask_directory(directory, loading),
+                    NodesView::Favorites => Vec::new(),
                 }
-                Vec::new()
             }
             (KeyCode::Char('a'), NodesView::All) => {
                 let Some(row) = row else {
@@ -222,8 +221,15 @@ impl NodesScreen {
                 });
                 Vec::new()
             }
-            (KeyCode::Char('r'), NodesView::All) => {
-                self.loading = true;
+            (KeyCode::Char('s'), _) => {
+                self.prompt = Some(Prompt {
+                    label: GOTO,
+                    text: String::new(),
+                });
+                ask_directory(directory, loading)
+            }
+            (KeyCode::Char('r'), NodesView::All) if !*loading => {
+                *loading = true;
                 vec![Cmd::LoadDirectory { refresh: true }]
             }
             _ => Vec::new(),
@@ -248,6 +254,13 @@ impl App {
         let Some(Screen::Nodes(screen)) = self.stack.last_mut() else {
             return Vec::new();
         };
+        if screen
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.label == GOTO)
+        {
+            return self.goto_key(key);
+        }
         if let Some(prompt) = &mut screen.prompt {
             match prompt.key(key) {
                 PromptKey::Edited => {
@@ -292,7 +305,13 @@ impl App {
                 self.stack.push(Screen::Help);
                 Vec::new()
             }
-            Nav::Pass => screen.command(key, &mut self.favorites, directory, page),
+            Nav::Pass => screen.command(
+                key,
+                &mut self.favorites,
+                directory,
+                &mut self.directory_loading,
+                page,
+            ),
         }
     }
 }
@@ -314,7 +333,7 @@ pub(super) fn draw(
         NodesView::All => "全部节点",
     };
     let mut left = vec![segment("V2EX", Tone::Site), segment(view, Tone::Location)];
-    if screen.loading {
+    if app.directory_loading {
         left.push(segment("…", Tone::Status));
     }
     let position = match rows.get(screen.nav.cursor) {
@@ -324,7 +343,7 @@ pub(super) fn draw(
     let chrome = Chrome {
         left,
         right: app.right_segments(now),
-        hints: hints(screen),
+        hints: hints(screen, directory),
         position,
     };
     let inner = draw_frame(frame, frame.area(), &chrome, theme, edge);
@@ -332,9 +351,11 @@ pub(super) fn draw(
 }
 
 /// The prompt, the number being typed, the moving keys, or the screen's keys.
-fn hints(screen: &NodesScreen) -> Vec<(String, String)> {
-    if let Some(prompt) = &screen.prompt {
-        return vec![prompt.hint()];
+fn hints(screen: &NodesScreen, directory: Option<&[Node]>) -> Vec<(String, String)> {
+    match &screen.prompt {
+        Some(prompt) if prompt.label == GOTO => return goto_hints(prompt, directory),
+        Some(prompt) => return vec![prompt.hint()],
+        None => {}
     }
     if !screen.nav.typed.is_empty() {
         return vec![hint("Enter", &format!("跳到 {}", screen.nav.typed))];
@@ -518,7 +539,7 @@ mod tests {
         let cmds = code(&mut app, KeyCode::Char('y'));
         assert_eq!(cmds, [Cmd::LoadDirectory { refresh: false }]);
         assert_eq!(nodes_screen(&app).view, NodesView::All);
-        assert!(nodes_screen(&app).loading);
+        assert!(app.directory_loading);
         // Leaving and coming back while it loads asks only once.
         assert!(chars(&mut app, "yy").is_empty());
 
@@ -527,7 +548,7 @@ mod tests {
             vec![node("go", "Go", 5), node("python", "Python", 50)],
         );
         assert!(cmds.is_empty());
-        assert!(!nodes_screen(&app).loading);
+        assert!(!app.directory_loading);
         let rows = shown(&app);
         assert_eq!(rows.len(), 13);
         assert_eq!(rows[11].name, "python");
@@ -549,7 +570,24 @@ mod tests {
             code(&mut app, KeyCode::Char('r')),
             [Cmd::LoadDirectory { refresh: true }]
         );
-        assert!(nodes_screen(&app).loading);
+        assert!(app.directory_loading);
+    }
+
+    #[test]
+    fn r_does_not_ask_again_while_the_directory_is_on_its_way() {
+        let mut app = all_nodes(nodes(3));
+        code(&mut app, KeyCode::Char('r'));
+        assert!(code(&mut app, KeyCode::Char('r')).is_empty());
+        load_directory(&mut app, nodes(4));
+        assert_eq!(
+            code(&mut app, KeyCode::Char('r')),
+            [Cmd::LoadDirectory { refresh: true }]
+        );
+
+        // The first load counts too.
+        let (mut app, _) = launch(Start::Home);
+        code(&mut app, KeyCode::Char('y'));
+        assert!(code(&mut app, KeyCode::Char('r')).is_empty());
     }
 
     #[test]
@@ -693,6 +731,16 @@ mod tests {
         assert!(nodes_screen(&app).filter.is_none());
         assert_eq!(cursor(&app), 6);
 
+        // ← in the prompt cancels it like Esc, without leaving the screen.
+        code(&mut app, KeyCode::Home);
+        chars(&mut app, "/全");
+        assert!(code(&mut app, KeyCode::Left).is_empty());
+        assert!(nodes_screen(&app).prompt.is_none());
+        assert!(nodes_screen(&app).filter.is_none());
+        assert_eq!(shown(&app).len(), 7);
+        assert_eq!(cursor(&app), 6);
+        assert!(!app.quit);
+
         chars(&mut app, "/x");
         code(&mut app, KeyCode::Backspace);
         code(&mut app, KeyCode::Enter);
@@ -769,7 +817,7 @@ mod tests {
             now(),
         );
         assert!(cmds.is_empty());
-        assert!(!nodes_screen(&app).loading);
+        assert!(!app.directory_loading);
         assert!(app.error.as_deref().unwrap().contains("连接超时"));
         assert_eq!(shown(&app).len(), 11);
         assert_eq!(nodes_screen(&app).view, NodesView::All);

@@ -38,7 +38,7 @@ pub struct Chrome {
     pub left: Vec<Segment>,
     /// Top border, right group.
     pub right: Vec<Segment>,
-    /// Bottom border, left: (key, description).
+    /// Bottom border, left: (key, description). An empty description shows the key alone.
     pub hints: Vec<(String, String)>,
     /// Bottom border, right, such as "3/50" or "62%".
     pub position: String,
@@ -50,8 +50,9 @@ pub const MIN_SIZE: (u16, u16) = (40, 8);
 /// Draws the border and returns the area inside it. Right-group segments are dropped from the
 /// last one until at least one border cell is left between the two groups; the first one is
 /// instead cut, ending with `…`, while at least 8 cells are left for it. Hints are dropped from
-/// the last one until they fit beside the position. The left group and the position stay, cut
-/// at the corners if they alone are too wide.
+/// the last one until they fit beside the position; the first one is instead cut from its start,
+/// beginning with `…`, so the end of a typed text stays in sight. The left group and the
+/// position stay, cut at the corners if they alone are too wide.
 pub fn draw_frame(
     frame: &mut Frame,
     area: Rect,
@@ -212,6 +213,34 @@ fn cut(seg: &Segment, room: usize, theme: &Theme, edge: SegmentEdge) -> Vec<Span
     }
 }
 
+/// A hint with characters dropped from its start and `…` put before the rest, so that it is at
+/// most `room` cells wide; nothing when `room` is 0.
+fn cut_front(hint: &[Span<'static>], room: usize) -> Vec<Span<'static>> {
+    if room == 0 {
+        return Vec::new();
+    }
+    let mut spans = hint.to_vec();
+    // Each pass drops a character or an empty span, so the loop ends by the time the spans are
+    // empty, which fits any `room` of 1 or more.
+    while width(&spans) + 1 > room {
+        let rest = {
+            let mut chars = spans[0].content.chars();
+            chars.next();
+            chars.as_str().to_string()
+        };
+        if rest.is_empty() {
+            spans.remove(0);
+        } else {
+            spans[0].content = rest.into();
+        }
+    }
+    match spans.first_mut() {
+        Some(first) => first.content = format!("…{}", first.content).into(),
+        None => spans.push(Span::raw("…")),
+    }
+    spans
+}
+
 /// Draws the hints and the position on the bottom border row, never on the corner cells.
 fn draw_bottom(buf: &mut Buffer, area: Rect, chrome: &Chrome, theme: &Theme) {
     let avail = usize::from(area.width - 2);
@@ -224,11 +253,12 @@ fn draw_bottom(buf: &mut Buffer, area: Rect, chrome: &Chrome, theme: &Theme) {
         .hints
         .iter()
         .map(|(key, label)| {
-            vec![
-                Span::styled(sanitize(key), theme.style(Paint::Location)),
-                Span::raw(" "),
-                Span::styled(sanitize(label), theme.style(Paint::Plain)),
-            ]
+            let mut spans = vec![Span::styled(sanitize(key), theme.style(Paint::Location))];
+            if !label.is_empty() {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(sanitize(label), theme.style(Paint::Plain)));
+            }
+            spans
         })
         .collect();
     // A space on each side of the hints, the gap between two of them.
@@ -236,19 +266,26 @@ fn draw_bottom(buf: &mut Buffer, area: Rect, chrome: &Chrome, theme: &Theme) {
         let gaps = HINT_GAP.len() * hints.len().saturating_sub(1);
         2 + gaps + hints.iter().map(|spans| width(spans)).sum::<usize>()
     };
+    let room = avail - position_width;
     let mut keep = hints.len();
-    while keep > 0 && hints_width(&hints[..keep]) + position_width > avail {
+    while keep > 1 && hints_width(&hints[..keep]) > room {
         keep -= 1;
     }
-    let y = area.bottom() - 1;
-    if keep > 0 {
-        let mut spans = vec![Span::raw(" ")];
+    let mut inside = Vec::new();
+    if keep == 1 && hints_width(&hints[..1]) > room {
+        inside = cut_front(&hints[0], room.saturating_sub(2));
+    } else {
         for (i, hint) in hints[..keep].iter().enumerate() {
             if i > 0 {
-                spans.push(Span::raw(HINT_GAP));
+                inside.push(Span::raw(HINT_GAP));
             }
-            spans.extend(hint.iter().cloned());
+            inside.extend(hint.iter().cloned());
         }
+    }
+    let y = area.bottom() - 1;
+    if !inside.is_empty() {
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(inside);
         spans.push(Span::raw(" "));
         buf.set_line(area.x + 1, y, &Line::from(spans), area.width - 2);
     }
@@ -552,6 +589,47 @@ mod tests {
         assert_eq!(
             row(&buf, 0),
             format!("╭ V2EX  python  +4 ~2  abcdefg {}╮", "─".repeat(8))
+        );
+    }
+
+    #[test]
+    fn a_prompt_wider_than_the_room_keeps_the_end_of_its_text() {
+        // Both texts are 30 columns wide.
+        for (text, tail) in [
+            ("abcdefghijklmnopqrstuvwxyz0123", "xyz0123"),
+            ("一二三四五六七八九十甲乙丙丁戊", "甲乙丙丁戊"),
+        ] {
+            let mut c = chrome();
+            c.hints = vec![
+                ("过滤：".to_string(), text.to_string()),
+                ("?".to_string(), "说明".to_string()),
+            ];
+            for edge in EDGES {
+                let (buf, _) = draw(40, 8, &c, true, edge);
+                assert_corners(&buf);
+                let bottom = row(&buf, 7);
+                assert_eq!(bottom.width(), 40, "{bottom}");
+                assert!(bottom.starts_with("╰ …"), "{bottom}");
+                assert!(bottom.contains(tail), "{bottom}");
+                assert!(bottom.ends_with(" 3/50 ╯"), "{bottom}");
+                assert!(!bottom.contains("说明"), "{bottom}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_hint_without_a_label_is_only_its_key() {
+        let mut c = chrome();
+        c.hints = vec![
+            ("节点：".to_string(), "py".to_string()),
+            ("python".to_string(), String::new()),
+            ("pytorch".to_string(), String::new()),
+        ];
+        let (buf, _) = draw(80, 8, &c, true, SegmentEdge::Plain);
+        assert!(
+            row(&buf, 7).starts_with("╰ 节点： py   python   pytorch ─"),
+            "{}",
+            row(&buf, 7)
         );
     }
 

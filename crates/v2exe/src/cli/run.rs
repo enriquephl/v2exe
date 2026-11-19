@@ -10,9 +10,10 @@ use clap::CommandFactory;
 use v2ex_rs::{Client, ClientBuilder, Listing, Node};
 
 use super::args::{Cli, Command};
-use super::exit::{exit_code, message};
+use super::exit::exit_code;
 use super::output::{self, Painter};
 use super::topic_ref::parse_topic_ref;
+use crate::errors::message;
 use crate::render::sanitize;
 use crate::store::config::{self, Config, ConfigError};
 use crate::store::paths::Dirs;

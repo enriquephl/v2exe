@@ -21,14 +21,15 @@ pub enum PromptKey {
 
 impl Prompt {
     /// A printable character is appended, `Backspace` deletes the last character, `Enter`
-    /// submits, `Esc` cancels. Any other key leaves the text as it is and counts as `Edited`.
+    /// submits, `Esc` and `←` cancel. Any other key leaves the text as it is and counts as
+    /// `Edited`.
     pub fn key(&mut self, key: KeyEvent) -> PromptKey {
         let plain = !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         match key.code {
             KeyCode::Enter => return PromptKey::Submit,
-            KeyCode::Esc => return PromptKey::Cancel,
+            KeyCode::Esc | KeyCode::Left => return PromptKey::Cancel,
             KeyCode::Tab => return PromptKey::Complete,
             KeyCode::Backspace => {
                 self.text.pop();
@@ -75,6 +76,7 @@ mod tests {
 
         assert_eq!(p.key(key(KeyCode::Enter)), PromptKey::Submit);
         assert_eq!(p.key(key(KeyCode::Esc)), PromptKey::Cancel);
+        assert_eq!(p.key(key(KeyCode::Left)), PromptKey::Cancel);
         assert_eq!(p.key(key(KeyCode::Tab)), PromptKey::Complete);
         assert_eq!(p.text, "pY");
         assert_eq!(p.hint(), ("过滤：".to_string(), "pY".to_string()));

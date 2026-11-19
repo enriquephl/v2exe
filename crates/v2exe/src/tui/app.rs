@@ -6,14 +6,15 @@ use chrono::{DateTime, FixedOffset, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::widgets::Paragraph;
-use v2ex_rs::{Error, Listing, Node, RateLimit, Reply, Topic};
+use v2ex_rs::{Listing, Node, RateLimit, Reply, Topic};
 
 use super::Start;
 use super::frame::{Chrome, Segment, Tone, draw_frame, draw_too_small, fits};
 use super::nodes::{self, NodesScreen, listing_name};
 use super::reader::ReaderScreen;
 use super::theme::{Paint, Theme};
-use super::topics::TopicsScreen;
+use super::topics::{self, TopicsScreen};
+use crate::errors::message;
 use crate::store::config::SegmentEdge;
 use crate::store::favorites::{Favorites, listing_title};
 use crate::store::read_state::ReadState;
@@ -79,6 +80,8 @@ pub struct App {
     pub favorites: Favorites,
     pub read: ReadState,
     pub directory: Option<Vec<Node>>,
+    /// The node directory has been asked for and has not arrived.
+    pub directory_loading: bool,
     pub quota: Option<RateLimit>,
     /// Why the last request or file write failed; cleared by the next successful request.
     pub error: Option<String>,
@@ -104,6 +107,7 @@ impl App {
             favorites,
             read,
             directory: None,
+            directory_loading: false,
             quota: None,
             error: None,
             size,
@@ -124,15 +128,44 @@ impl App {
         (app, cmds)
     }
 
-    pub fn update(&mut self, msg: Msg, _now: DateTime<Utc>) -> Vec<Cmd> {
+    pub fn update(&mut self, msg: Msg, now: DateTime<Utc>) -> Vec<Cmd> {
         match msg {
-            Msg::Key(key) => self.key(key),
+            Msg::Key(key) => self.key(key, now),
             Msg::Resize(columns, rows) => {
                 self.size = (columns, rows);
                 self.clamp_lists();
                 Vec::new()
             }
-            Msg::TopicsLoaded { .. } | Msg::ThreadLoaded { .. } => Vec::new(),
+            // The quota of every result is kept: it is the latest the site reported. The topics
+            // go only to the list still waiting for this ticket; a list that was left or asked
+            // again since is not.
+            Msg::TopicsLoaded {
+                ticket,
+                result,
+                quota,
+            } => {
+                if quota.is_some() {
+                    self.quota = quota;
+                }
+                let waiting = self.stack.iter_mut().find_map(|screen| match screen {
+                    Screen::Topics(topics) if topics.pending == Some(ticket) => Some(topics),
+                    _ => None,
+                });
+                let Some(screen) = waiting else {
+                    return Vec::new();
+                };
+                screen.pending = None;
+                match result {
+                    Ok(topics) => {
+                        screen.topics = topics;
+                        self.error = None;
+                    }
+                    Err(e) => self.error = Some(message(&e, &self.tz)),
+                }
+                self.clamp_lists();
+                Vec::new()
+            }
+            Msg::ThreadLoaded { .. } => Vec::new(),
             Msg::DirectoryLoaded { result, quota } => {
                 if quota.is_some() {
                     self.quota = quota;
@@ -142,11 +175,9 @@ impl App {
                         self.directory = Some(nodes);
                         self.error = None;
                     }
-                    Err(e) => self.error = Some(error_text(&e, &self.tz)),
+                    Err(e) => self.error = Some(message(&e, &self.tz)),
                 }
-                if let Some(Screen::Nodes(screen)) = self.stack.first_mut() {
-                    screen.loading = false;
-                }
+                self.directory_loading = false;
                 self.clamp_lists();
                 Vec::new()
             }
@@ -189,6 +220,11 @@ impl App {
         usize::from(self.size.1.saturating_sub(2))
     }
 
+    /// Topics on a page of the topic list, which takes two rows for each.
+    pub(super) fn topics_page(&self) -> usize {
+        (self.inner_height() / 2).max(1)
+    }
+
     /// Pushes the topic list of `listing` and asks for its topics.
     pub(super) fn open_listing(&mut self, listing: Listing, title: String) -> Vec<Cmd> {
         let ticket = self.ticket();
@@ -205,7 +241,7 @@ impl App {
     }
 
     /// Pushes the reader of topic `id` and asks for the topic and its replies.
-    fn open_topic(&mut self, id: u64) -> Vec<Cmd> {
+    pub(super) fn open_topic(&mut self, id: u64) -> Vec<Cmd> {
         let ticket = self.ticket();
         self.stack
             .push(Screen::Reader(ReaderScreen::new(id, ticket)));
@@ -216,14 +252,15 @@ impl App {
         }]
     }
 
-    fn key(&mut self, key: KeyEvent) -> Vec<Cmd> {
+    fn key(&mut self, key: KeyEvent, now: DateTime<Utc>) -> Vec<Cmd> {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.quit = true;
             return Vec::new();
         }
         match self.stack.last() {
             Some(Screen::Nodes(_)) => return self.nodes_key(key),
-            Some(Screen::Topics(_) | Screen::Reader(_)) => match key.code {
+            Some(Screen::Topics(_)) => return self.topics_key(key, now),
+            Some(Screen::Reader(_)) => match key.code {
                 KeyCode::Left | KeyCode::Char('q' | 'h') => {
                     self.stack.pop();
                 }
@@ -242,15 +279,32 @@ impl App {
 
     /// Puts the cursor of every list back in range after its rows or the page changed.
     fn clamp_lists(&mut self) {
-        let page = self.inner_height();
+        let (page, topics_page) = (self.inner_height(), self.topics_page());
         let directory = self.directory.as_deref();
         for screen in &mut self.stack {
-            if let Screen::Nodes(nodes) = screen {
-                let len = nodes.rows(&self.favorites, directory).len();
-                nodes.nav.clamp(len, page);
+            match screen {
+                Screen::Nodes(nodes) => {
+                    let len = nodes.rows(&self.favorites, directory).len();
+                    nodes.nav.clamp(len, page);
+                }
+                Screen::Topics(topics) => {
+                    let len = topics.rows().len();
+                    topics.nav.clamp(len, topics_page);
+                }
+                Screen::Reader(_) | Screen::Help => {}
             }
         }
     }
+}
+
+/// Asks for the node directory when there is none and none is on its way; `loading` is whether
+/// one is.
+pub(super) fn ask_directory(directory: Option<&[Node]>, loading: &mut bool) -> Vec<Cmd> {
+    if directory.is_some() || *loading {
+        return Vec::new();
+    }
+    *loading = true;
+    vec![Cmd::LoadDirectory { refresh: false }]
 }
 
 /// A segment of the top border.
@@ -266,25 +320,6 @@ pub(super) fn hint(key: &str, label: &str) -> (String, String) {
     (key.to_string(), label.to_string())
 }
 
-/// Why a request failed, in Chinese; a recovery time is shown in `tz`.
-fn error_text(e: &Error, tz: &FixedOffset) -> String {
-    match e {
-        Error::NotFound => "找不到这个帖子或节点".to_string(),
-        Error::RateLimited { reset: Some(t) } => {
-            format!(
-                "接口额度已用完，{} 恢复",
-                t.with_timezone(tz).format("%H:%M")
-            )
-        }
-        Error::RateLimited { reset: None } => "接口额度已用完，稍后再试".to_string(),
-        Error::Restricted { node } => format!("节点 {node} 需要登录才能查看"),
-        Error::Network(s) => format!("网络错误：{s}"),
-        Error::Status(c) => format!("站点返回 HTTP {c}"),
-        Error::Decode(s) => format!("无法解析站点的响应：{s}"),
-        Error::Config(s) => format!("设置有误：{s}"),
-    }
-}
-
 /// Draws the screen on top of the stack, or only a notice when the terminal is too small.
 pub fn view(app: &App, theme: &Theme, edge: SegmentEdge, now: DateTime<Utc>, frame: &mut Frame) {
     let area = frame.area();
@@ -298,22 +333,16 @@ pub fn view(app: &App, theme: &Theme, edge: SegmentEdge, now: DateTime<Utc>, fra
         hints,
         position: String::new(),
     };
-    let back = || vec![hint("←", "返回"), hint("?", "说明")];
-    let waiting = |pending: Option<u64>| pending.map(|_| segment("…", Tone::Status));
     match app.stack.last() {
         Some(Screen::Nodes(screen)) => nodes::draw(app, screen, theme, edge, now, frame),
-        Some(Screen::Topics(screen)) => {
-            let mut left = vec![
-                segment("V2EX", Tone::Site),
-                segment(screen.title.as_str(), Tone::Location),
-            ];
-            left.extend(waiting(screen.pending));
-            draw_frame(frame, area, &chrome(left, back()), theme, edge);
-        }
+        Some(Screen::Topics(screen)) => topics::draw(app, screen, theme, edge, now, frame),
         Some(Screen::Reader(screen)) => {
             let mut left = vec![segment("V2EX", Tone::Site)];
-            left.extend(waiting(screen.pending));
-            draw_frame(frame, area, &chrome(left, back()), theme, edge);
+            if screen.pending.is_some() {
+                left.push(segment("…", Tone::Status));
+            }
+            let hints = vec![hint("←", "返回"), hint("?", "说明")];
+            draw_frame(frame, area, &chrome(left, hints), theme, edge);
         }
         Some(Screen::Help) => {
             let left = vec![segment("V2EX", Tone::Site), segment("说明", Tone::Location)];
@@ -331,6 +360,11 @@ pub(crate) mod testing {
     //! Building an app and pressing keys, for the tests of every screen.
 
     use chrono::TimeZone;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use unicode_width::UnicodeWidthStr;
+    use v2ex_rs::MemberRef;
 
     use super::*;
 
@@ -412,30 +446,62 @@ pub(crate) mod testing {
             _ => panic!("the bottom screen is not the node list"),
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use chrono::{Duration, TimeZone};
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
-    use unicode_width::UnicodeWidthStr;
-
-    use super::testing::*;
-    use super::*;
-    use crate::tui::nodes::NodesView;
-
-    fn quota(limit: u32, remaining: u32) -> RateLimit {
-        RateLimit {
-            limit,
-            remaining,
-            // 13:00 at UTC+8.
-            reset: Utc.with_ymd_and_hms(2026, 11, 19, 5, 0, 0).unwrap(),
+    /// A topic created at [`now`], with a made-up URL.
+    pub fn topic(id: u64, title: &str, author: &str, replies: u32) -> Topic {
+        Topic {
+            id,
+            title: title.into(),
+            url: format!("https://www.v2ex.com/t/{id}"),
+            author: MemberRef {
+                username: author.into(),
+                id: None,
+            },
+            node: None,
+            created: now(),
+            last_touched: None,
+            replies,
+            last_reply_by: None,
+            content: None,
+            content_html: None,
         }
     }
 
-    fn draw(app: &App, w: u16, h: u16) -> Buffer {
+    /// The topic list nearest the top of the stack.
+    pub fn topics_screen(app: &App) -> &TopicsScreen {
+        app.stack
+            .iter()
+            .rev()
+            .find_map(|screen| match screen {
+                Screen::Topics(topics) => Some(topics),
+                _ => None,
+            })
+            .expect("a topic list is on the stack")
+    }
+
+    /// Feeds `topics` in as the result the topic list nearest the top is waiting for.
+    pub fn load_topics(app: &mut App, topics: Vec<Topic>) -> Vec<Cmd> {
+        let ticket = topics_screen(app)
+            .pending
+            .expect("the topic list is waiting for topics");
+        app.update(
+            Msg::TopicsLoaded {
+                ticket,
+                result: Ok(topics),
+                quota: None,
+            },
+            now(),
+        )
+    }
+
+    /// An app on the hot listing with `topics` loaded.
+    pub fn listing(topics: Vec<Topic>) -> App {
+        let (mut app, _) = launch(Start::Listing(Listing::Hot));
+        load_topics(&mut app, topics);
+        app
+    }
+
+    pub fn draw(app: &App, w: u16, h: u16) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
             .draw(|f| view(app, &Theme { color: true }, SegmentEdge::Plain, now(), f))
@@ -444,7 +510,7 @@ mod tests {
     }
 
     /// The text of one row; the hidden cells behind a wide character add nothing.
-    fn row(buf: &Buffer, y: u16) -> String {
+    pub fn row(buf: &Buffer, y: u16) -> String {
         let mut out = String::new();
         let mut hidden = 0;
         for x in 0..buf.area.width {
@@ -459,12 +525,12 @@ mod tests {
         out
     }
 
-    fn all_text(buf: &Buffer) -> String {
+    pub fn all_text(buf: &Buffer) -> String {
         (0..buf.area.height).map(|y| row(buf, y) + "\n").collect()
     }
 
     /// Every row is as wide as the terminal and ends in the border.
-    fn assert_framed(buf: &Buffer) {
+    pub fn assert_framed(buf: &Buffer) {
         let (w, h) = (buf.area.width, buf.area.height);
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(w - 1, 0)].symbol(), "╮");
@@ -475,6 +541,108 @@ mod tests {
         for y in 0..h {
             assert_eq!(row(buf, y).width(), usize::from(w), "row {y}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, TimeZone};
+    use v2ex_rs::Error;
+
+    use super::testing::*;
+    use super::*;
+    use crate::tui::nodes::NodesView;
+
+    fn quota(limit: u32, remaining: u32) -> RateLimit {
+        RateLimit {
+            limit,
+            remaining,
+            // 13:00 at UTC+8.
+            reset: Utc.with_ymd_and_hms(2026, 11, 19, 5, 0, 0).unwrap(),
+        }
+    }
+
+    fn loaded(ticket: u64, result: v2ex_rs::Result<Vec<Topic>>) -> Msg {
+        Msg::TopicsLoaded {
+            ticket,
+            result,
+            quota: None,
+        }
+    }
+
+    #[test]
+    fn loaded_topics_are_shown_and_a_stale_ticket_is_dropped() {
+        let (mut app, _) = launch(Start::Listing(Listing::Hot));
+        let t1 = topics_screen(&app).pending.unwrap();
+        code(&mut app, KeyCode::Char('r'));
+        let t2 = topics_screen(&app).pending.unwrap();
+        assert_ne!(t1, t2);
+
+        let three = (1..=3).map(|i| topic(i, "示例", "alice", 1)).collect();
+        assert!(app.update(loaded(t1, Ok(three)), now()).is_empty());
+        assert!(topics_screen(&app).topics.is_empty());
+        assert_eq!(topics_screen(&app).pending, Some(t2));
+
+        let two = (1..=2).map(|i| topic(i, "示例", "alice", 1)).collect();
+        assert!(app.update(loaded(t2, Ok(two)), now()).is_empty());
+        assert_eq!(topics_screen(&app).topics.len(), 2);
+        assert_eq!(topics_screen(&app).pending, None);
+    }
+
+    #[test]
+    fn a_result_for_a_screen_already_left_is_dropped() {
+        let (mut app, _) = launch(Start::Listing(Listing::Hot));
+        let t1 = topics_screen(&app).pending.unwrap();
+        code(&mut app, KeyCode::Left);
+        assert!(matches!(app.stack.as_slice(), [Screen::Nodes(_)]));
+        let cmds = app.update(loaded(t1, Ok(vec![topic(1, "示例", "alice", 1)])), now());
+        assert!(cmds.is_empty());
+        assert!(matches!(app.stack.as_slice(), [Screen::Nodes(_)]));
+    }
+
+    #[test]
+    fn a_result_reaches_the_topic_list_under_the_reader() {
+        let mut app = listing(vec![topic(1, "示例", "alice", 1)]);
+        code(&mut app, KeyCode::Char('r'));
+        let ticket = topics_screen(&app).pending.unwrap();
+        code(&mut app, KeyCode::Enter);
+        assert!(matches!(app.stack.last(), Some(Screen::Reader(_))));
+        let two = (1..=2).map(|i| topic(i, "示例", "alice", 1)).collect();
+        assert!(app.update(loaded(ticket, Ok(two)), now()).is_empty());
+        assert_eq!(topics_screen(&app).topics.len(), 2);
+        assert_eq!(topics_screen(&app).pending, None);
+        assert!(matches!(app.stack.last(), Some(Screen::Reader(_))));
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_topics_and_reports_the_reason() {
+        let mut app = listing((1..=3).map(|i| topic(i, "示例", "alice", 1)).collect());
+        code(&mut app, KeyCode::End);
+        code(&mut app, KeyCode::Char('r'));
+        let ticket = topics_screen(&app).pending.unwrap();
+        let cmds = app.update(
+            Msg::TopicsLoaded {
+                ticket,
+                result: Err(Error::RateLimited {
+                    reset: Some(quota(600, 0).reset),
+                }),
+                quota: Some(quota(600, 0)),
+            },
+            now(),
+        );
+        assert!(cmds.is_empty());
+        assert_eq!(topics_screen(&app).topics.len(), 3);
+        assert_eq!(topics_screen(&app).pending, None);
+        let error = app.error.clone().unwrap();
+        assert!(error.contains("额度") && error.contains("13:00"), "{error}");
+        assert_eq!(app.quota, Some(quota(600, 0)));
+
+        // A later success clears the error and pulls the cursor back onto the shorter list.
+        code(&mut app, KeyCode::Char('r'));
+        load_topics(&mut app, vec![topic(1, "示例", "alice", 1)]);
+        assert!(app.error.is_none());
+        assert_eq!(topics_screen(&app).topics.len(), 1);
+        assert_eq!(topics_screen(&app).nav.cursor, 0);
     }
 
     #[test]
@@ -563,6 +731,13 @@ mod tests {
         ctrl_c(&mut app);
         assert!(app.quit);
 
+        // While typing a node name on the topic list.
+        let (mut app, _) = launch(Start::Listing(Listing::Hot));
+        code(&mut app, KeyCode::Char('s'));
+        assert!(topics_screen(&app).prompt.is_some());
+        ctrl_c(&mut app);
+        assert!(app.quit);
+
         // On every other screen.
         for start in [Start::Listing(Listing::Hot), Start::Topic(1)] {
             let (mut app, _) = launch(start);
@@ -606,21 +781,8 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_screens_go_back_and_ignore_their_results() {
-        let (mut app, _) = launch(Start::Listing(Listing::Hot));
-        let ticket = match &app.stack[1] {
-            Screen::Topics(topics) => topics.pending.unwrap(),
-            _ => panic!("expected Topics"),
-        };
-        let cmds = app.update(
-            Msg::TopicsLoaded {
-                ticket,
-                result: Ok(Vec::new()),
-                quota: None,
-            },
-            now(),
-        );
-        assert!(cmds.is_empty());
+    fn the_topic_list_and_the_reader_open_help_and_go_back() {
+        let mut app = listing(Vec::new());
         code(&mut app, KeyCode::Char('?'));
         assert!(matches!(app.stack.last(), Some(Screen::Help)));
         code(&mut app, KeyCode::Esc);
@@ -768,13 +930,24 @@ mod tests {
     #[test]
     fn every_screen_keeps_its_border_at_the_smallest_size() {
         let mut apps = vec![launch(Start::Home).0, launch(Start::Topic(1)).0];
-        let (mut listing, _) = launch(Start::Listing(Listing::Hot));
-        code(&mut listing, KeyCode::Char('?'));
-        apps.push(listing);
+        let (mut help, _) = launch(Start::Listing(Listing::Hot));
+        code(&mut help, KeyCode::Char('?'));
+        apps.push(help);
         let (mut all, _) = launch(Start::Home);
         code(&mut all, KeyCode::Char('y'));
         load_directory(&mut all, nodes(100));
         apps.push(all);
+        let mut topics = listing(
+            (1..=50)
+                .map(|i| topic(i, "示例", "alice", i as u32))
+                .collect(),
+        );
+        code(&mut topics, KeyCode::End);
+        apps.push(topics);
+        let mut goto = listing(Vec::new());
+        load_directory(&mut goto, nodes(100));
+        chars(&mut goto, &format!("s{}", "node".repeat(20)));
+        apps.push(goto);
         for mut app in apps {
             for (w, h) in [(40, 8), (41, 9), (80, 24), (200, 60)] {
                 app.update(Msg::Resize(w, h), now());
