@@ -1,5 +1,5 @@
-//! Text and JSON output of topics, replies and nodes. Every function returns text ending in a
-//! newline.
+//! Text and JSON output of topics, replies and nodes. Non-empty output ends with a newline; the
+//! text rows of an empty list are the empty string.
 
 use chrono::{DateTime, FixedOffset, Utc};
 use serde::Serialize;
@@ -174,8 +174,19 @@ pub fn json_nodes(nodes: &[Node]) -> String {
     to_json(&nodes)
 }
 
+/// Pretty JSON that is safe to print to a terminal: besides the C0 controls serde_json already
+/// escapes, DEL and the C1 controls (U+007F to U+009F) come out as `\u00XX`. Those characters
+/// can only occur inside strings, so escaping them there keeps the document valid.
 fn to_json(value: &impl Serialize) -> String {
-    let mut out = serde_json::to_string_pretty(value).expect("the public types serialize to JSON");
+    let json = serde_json::to_string_pretty(value).expect("the public types serialize to JSON");
+    let mut out = String::with_capacity(json.len() + 1);
+    for c in json.chars() {
+        if ('\u{7f}'..='\u{9f}').contains(&c) {
+            out.push_str(&format!("\\u{:04x}", u32::from(c)));
+        } else {
+            out.push(c);
+        }
+    }
     out.push('\n');
     out
 }
@@ -488,6 +499,26 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v[0]["created"], "2026-11-19T01:00:00Z");
         assert!(json_nodes(&[node("a", "A", 1)]).ends_with("]\n"));
+    }
+
+    #[test]
+    fn json_escapes_del_and_c1_controls() {
+        let title = "a\u{7f}b\u{85}c\u{9b}d\u{9f}e\u{a0}f";
+        let t = topic(1, 0, title, None);
+        let text = json_topics(std::slice::from_ref(&t));
+        for escaped in ["\\u007f", "\\u0085", "\\u009b", "\\u009f"] {
+            assert!(text.contains(escaped), "{escaped}: {text}");
+        }
+        assert!(
+            text.chars().all(|c| !('\u{7f}'..='\u{9f}').contains(&c)),
+            "{text:?}"
+        );
+        assert!(text.contains('\u{a0}'));
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v[0]["title"], title);
+        let detail = json_topic(&t, Some(&[reply(1, "b\u{9b}ob", "x")]));
+        assert!(!detail.contains('\u{9b}'), "{detail:?}");
+        assert!(!json_nodes(&[node("a\u{9b}", "A", 1)]).contains('\u{9b}'));
     }
 
     #[test]

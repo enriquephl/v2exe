@@ -23,14 +23,17 @@ pub struct Page<T> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Topic {
     pub id: u64,
-    /// Without the `[node title]` prefix that tab and hot feeds add; that part lives in `node`.
+    /// Without the `[node title]` prefix that the hot-tab feed adds; that part is split into
+    /// `node`.
     pub title: String,
     pub url: String,
     pub author: MemberRef,
     /// `None` for tab feeds other than hot.
     pub node: Option<NodeRef>,
     pub created: DateTime<Utc>,
+    /// Feeds take `<updated>`, which equals API 1.0's `last_touched`.
     pub last_touched: Option<DateTime<Utc>>,
+    /// Feeds take the link's `#reply<N>` fragment, 0 without one.
     pub replies: u32,
     /// Only the API 1.0 source provides it.
     pub last_reply_by: Option<String>,

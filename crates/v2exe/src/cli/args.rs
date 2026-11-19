@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 
 /// V2EX 终端阅读器
 #[derive(Debug, Parser)]
-#[command(arg_required_else_help = true)]
+#[command(version, arg_required_else_help = true)]
 pub struct Cli {
     /// 输出 JSON
     #[arg(long, global = true)]
@@ -19,7 +19,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub proxy: Option<String>,
     /// 请求超时，单位秒
-    #[arg(long, global = true)]
+    #[arg(long, global = true, value_parser = clap::value_parser!(u64).range(1..))]
     pub timeout: Option<u64>,
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -109,6 +109,26 @@ mod tests {
         assert_eq!(c.proxy.as_deref(), Some("socks5://p:1"));
         assert_eq!(c.timeout, Some(7));
         assert!(matches!(c.command, Some(Command::Hot { limit: Some(5) })));
+    }
+
+    #[test]
+    fn timeout_must_be_at_least_one_second() {
+        for value in ["0", "x"] {
+            let err = Cli::try_parse_from(["v2exe", "hot", "--timeout", value]).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::ValueValidation, "{value}");
+        }
+        let c = Cli::try_parse_from(["v2exe", "hot", "--timeout", "1"]).unwrap();
+        assert_eq!(c.timeout, Some(1));
+    }
+
+    #[test]
+    fn version_flag_is_known() {
+        assert_eq!(
+            Cli::try_parse_from(["v2exe", "--version"])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::DisplayVersion
+        );
     }
 
     #[test]

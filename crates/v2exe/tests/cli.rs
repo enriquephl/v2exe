@@ -9,6 +9,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const TOPICS: &str = include_str!("../../v2ex-rs/tests/fixtures/api1/topics.json");
 const TOPIC: &str = include_str!("../../v2ex-rs/tests/fixtures/api1/topic.json");
 const TOPIC_EMPTY: &str = include_str!("../../v2ex-rs/tests/fixtures/api1/topic_empty.json");
+const TOPIC_RESTRICTED: &str =
+    include_str!("../../v2ex-rs/tests/fixtures/api1/topic_restricted.json");
 const REPLIES: &str = include_str!("../../v2ex-rs/tests/fixtures/api1/replies.json");
 const NODES: &str = include_str!("../../v2ex-rs/tests/fixtures/api1/nodes.json");
 const NODE_FEED: &str = include_str!("../../v2ex-rs/tests/fixtures/feed/node.xml");
@@ -231,6 +233,24 @@ async fn title_only_topic_with_no_replies() {
 }
 
 #[tokio::test]
+async fn restricted_topic_exits_5_before_fetching_replies() {
+    let server = MockServer::start().await;
+    serve("/api/topics/show.json", &[("id", "1002")], TOPIC_RESTRICTED)
+        .mount(&server)
+        .await;
+    serve("/api/replies/show.json", &[], REPLIES)
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let out = run_against(&server, &["topic", "1002"]);
+
+    assert_eq!(out.code, 5, "{}", out.stderr);
+    assert_eq!(out.stdout, "");
+    assert!(out.stderr.contains("需要登录"), "{}", out.stderr);
+}
+
+#[tokio::test]
 async fn nodes_keyword_filters() {
     let server = MockServer::start().await;
     serve("/api/nodes/all.json", &[], NODES)
@@ -298,6 +318,21 @@ async fn missing_subcommand_prints_help_and_exits_2() {
 }
 
 #[tokio::test]
+async fn version_flag_prints_the_version() {
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = command(home.path());
+    cmd.arg("--version");
+
+    let out = finish(cmd);
+
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        out.stdout,
+        concat!("v2exe ", env!("CARGO_PKG_VERSION"), "\n")
+    );
+}
+
+#[tokio::test]
 async fn config_file_supplies_base_url_and_flags_override() {
     let server = MockServer::start().await;
     serve("/api/topics/hot.json", &[], TOPICS)
@@ -350,6 +385,56 @@ async fn malformed_config_exits_1() {
     );
     assert!(out.stderr.contains("有误"), "{}", out.stderr);
     assert!(!out.stderr.contains("panicked"), "{}", out.stderr);
+}
+
+#[tokio::test]
+async fn proxy_environment_variables_are_honoured() {
+    let server = MockServer::start().await;
+    serve("/api/topics/hot.json", &[], TOPICS)
+        .mount(&server)
+        .await;
+    let closed_port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let home = tempfile::tempdir().unwrap();
+    let hot = |no_proxy: Option<&str>| {
+        let mut cmd = command(home.path());
+        cmd.env("ALL_PROXY", format!("http://127.0.0.1:{closed_port}"))
+            .args(["--base-url", &server.uri(), "hot"]);
+        if let Some(hosts) = no_proxy {
+            cmd.env("NO_PROXY", hosts);
+        }
+        finish(cmd)
+    };
+
+    let proxied = hot(None);
+    let bypassed = hot(Some("127.0.0.1"));
+
+    assert_eq!(proxied.code, 6, "{}", proxied.stderr);
+    assert_eq!(bypassed.code, 0, "{}", bypassed.stderr);
+    assert_eq!(bypassed.stdout, hot_rows());
+}
+
+#[tokio::test]
+async fn zero_timeout_in_config_exits_1() {
+    let home = tempfile::tempdir().unwrap();
+    let config_dir = home.path().join("v2exe");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config = config_dir.join("config.toml");
+    std::fs::write(&config, "timeout = 0\n").unwrap();
+    let mut cmd = command(home.path());
+    cmd.arg("hot");
+
+    let out = finish(cmd);
+
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stderr.contains(&config.display().to_string()),
+        "{}",
+        out.stderr
+    );
+    assert!(out.stderr.contains("timeout"), "{}", out.stderr);
 }
 
 #[tokio::test]

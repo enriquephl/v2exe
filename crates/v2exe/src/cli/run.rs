@@ -1,5 +1,6 @@
 //! The non-interactive flow: settings, client, one subcommand, output.
 
+use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -24,14 +25,14 @@ pub struct RunEnv {
 }
 
 impl RunEnv {
-    /// Colors are on when `NO_COLOR` is unset and stdout is a terminal; the width is the
-    /// terminal's, and only known when stdout is a terminal that reports one; times use the
+    /// Colors are on when `NO_COLOR` is unset or empty and stdout is a terminal; the width is
+    /// the terminal's, and only known when stdout is a terminal that reports one; times use the
     /// local offset now.
     pub fn from_process() -> RunEnv {
         let tty = io::stdout().is_terminal();
         RunEnv {
             config_path: config::config_path(),
-            color: tty && std::env::var_os("NO_COLOR").is_none(),
+            color: color_enabled(tty, std::env::var_os("NO_COLOR").as_deref()),
             width: tty
                 .then(|| crossterm::terminal::size().ok())
                 .flatten()
@@ -40,6 +41,11 @@ impl RunEnv {
             tz: *Local::now().offset(),
         }
     }
+}
+
+/// Colors need a terminal, and `NO_COLOR` turns them off only when it has a value.
+fn color_enabled(tty: bool, no_color: Option<&OsStr>) -> bool {
+    tty && no_color.is_none_or(OsStr::is_empty)
 }
 
 /// Why a run failed: the process exit code and the text for stderr.
@@ -209,5 +215,19 @@ fn write_out(out: &mut dyn Write, text: &str) -> Result<(), Failure> {
             Err(Failure::new(1, format!("无法写出结果：{e}")))
         }
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::color_enabled;
+
+    #[test]
+    fn only_a_non_empty_no_color_turns_color_off() {
+        assert!(color_enabled(true, None));
+        assert!(color_enabled(true, Some("".as_ref())));
+        assert!(!color_enabled(true, Some("1".as_ref())));
+        assert!(!color_enabled(false, None));
+        assert!(!color_enabled(false, Some("".as_ref())));
     }
 }

@@ -59,7 +59,11 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Config::default()),
         Err(e) => return Err(fail(e.to_string())),
     };
-    toml::from_str(&text).map_err(|e| fail(e.to_string()))
+    let config: Config = toml::from_str(&text).map_err(|e| fail(e.to_string()))?;
+    if config.timeout == Some(0) {
+        return Err(fail("timeout 必须大于 0".to_string()));
+    }
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -124,6 +128,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = write(&tmp, "timeout = \"ten\"");
         assert!(load(&p).is_err());
+    }
+
+    #[test]
+    fn zero_timeout_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write(&tmp, "timeout = 0");
+        let e = load(&p).unwrap_err().to_string();
+        assert!(e.contains(&p.display().to_string()) && e.contains("timeout"));
     }
 
     #[test]
