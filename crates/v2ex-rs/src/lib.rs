@@ -5,6 +5,9 @@ mod error;
 // Only tests call the parsers.
 #[cfg_attr(not(test), expect(dead_code))]
 mod feed;
+// Only tests use the transport.
+#[cfg_attr(not(test), expect(dead_code))]
+mod http;
 mod types;
 
 pub use error::{Error, Result};
