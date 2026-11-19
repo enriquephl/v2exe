@@ -99,12 +99,19 @@ impl Transport {
     }
 
     /// Fetches `path` (with its query string) from the base URL. A successful body is served
-    /// from the cache for `ttl`; failures are never cached. Storing a body also drops every
-    /// entry that has expired.
+    /// from the cache for `ttl`; failures are never cached.
     pub(crate) async fn get(&self, path: &str, kind: Endpoint, ttl: Duration) -> Result<Fetched> {
         if let Some(body) = self.cached(path) {
             return Ok(Fetched { body, fresh: false });
         }
+        let body = self.request(path, kind).await?;
+        self.store(path, body.clone(), ttl);
+        Ok(Fetched { body, fresh: true })
+    }
+
+    /// Fetches `path` without reading or writing the cache, so an entry already cached stays
+    /// as it is until the caller replaces it with [`Transport::store`].
+    pub(crate) async fn request(&self, path: &str, kind: Endpoint) -> Result<Bytes> {
         if kind == Endpoint::Api {
             self.check_quota()?;
         }
@@ -113,13 +120,7 @@ impl Transport {
         let mut retries = 0;
         loop {
             match self.attempt(&url, kind).await {
-                Ok(body) => {
-                    let now = Instant::now();
-                    let mut cache = lock(&self.inner.cache);
-                    cache.retain(|_, (expires, _)| *expires > now);
-                    cache.insert(path.to_string(), (now + ttl, body.clone()));
-                    return Ok(Fetched { body, fresh: true });
-                }
+                Ok(body) => return Ok(body),
                 Err(Failure::Retry(_)) if retries < MAX_RETRIES => {
                     retries += 1;
                     tokio::time::sleep(BACKOFF_STEP * retries).await;
@@ -127,6 +128,15 @@ impl Transport {
                 Err(Failure::Retry(e) | Failure::Fatal(e)) => return Err(e),
             }
         }
+    }
+
+    /// Caches `body` under `path` for `ttl`, replacing an earlier entry and dropping every entry
+    /// that has expired.
+    pub(crate) fn store(&self, path: &str, body: Bytes, ttl: Duration) {
+        let now = Instant::now();
+        let mut cache = lock(&self.inner.cache);
+        cache.retain(|_, (expires, _)| *expires > now);
+        cache.insert(path.to_string(), (now + ttl, body));
     }
 
     /// The quota reported by the most recent `Api` response.
@@ -143,7 +153,8 @@ impl Transport {
         lock(&self.inner.cache).remove(path);
     }
 
-    fn cached(&self, path: &str) -> Option<Bytes> {
+    /// The body cached under `path`, unless it has expired.
+    pub(crate) fn cached(&self, path: &str) -> Option<Bytes> {
         let mut cache = lock(&self.inner.cache);
         match cache.get(path) {
             Some((expires, body)) if *expires > Instant::now() => Some(body.clone()),
@@ -387,6 +398,32 @@ mod tests {
         assert!(first.fresh);
         assert!(!second.fresh);
         assert_eq!(first.body, second.body);
+    }
+
+    #[tokio::test]
+    async fn request_bypasses_the_cache_and_leaves_its_entry() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("old"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("new"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let t = transport(&server);
+
+        t.get("/a", Endpoint::Feed, TTL).await.unwrap();
+        let requested = t.request("/a", Endpoint::Feed).await.unwrap();
+        let cached = t.get("/a", Endpoint::Feed, TTL).await.unwrap();
+
+        assert_eq!(&requested[..], b"new");
+        assert_eq!((&cached.body[..], cached.fresh), (&b"old"[..], false));
     }
 
     #[tokio::test]

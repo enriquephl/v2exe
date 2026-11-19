@@ -181,26 +181,41 @@ impl Client {
     }
 
     /// The ids of the recent topics of every restricted node. A source that fails is skipped.
-    /// With `refresh` the sources are fetched afresh, otherwise cached ids are reused.
+    /// With `refresh` each source is fetched afresh, and one whose fetch fails keeps its
+    /// unexpired cached ids; otherwise cached ids are reused.
     async fn restricted_ids(&self, refresh: bool) -> HashSet<u64> {
         let mut ids = HashSet::new();
         for node in restricted::RESTRICTED {
-            let path = id_source_path(node);
-            if refresh {
-                self.transport.forget(&path);
-            }
-            let topics = match node.source {
-                IdSource::Api => self.api_topics(&path, RESTRICTED_IDS_TTL).await,
-                IdSource::Feed => {
-                    let kind = FeedKind::Node(node.name.to_string());
-                    self.feed_topics(&path, &kind, RESTRICTED_IDS_TTL).await
-                }
-            };
-            if let Ok(topics) = topics {
+            if let Ok(topics) = self.id_source_topics(node, refresh).await {
                 ids.extend(topics.iter().map(|t| t.id));
             }
         }
         ids
+    }
+
+    async fn id_source_topics(&self, node: &RestrictedNode, refresh: bool) -> Result<Vec<Topic>> {
+        let path = id_source_path(node);
+        let (endpoint, kind) = match node.source {
+            IdSource::Api => (Endpoint::Api, None),
+            IdSource::Feed => (Endpoint::Feed, Some(FeedKind::Node(node.name.to_string()))),
+        };
+        let parse = |body: &[u8]| match &kind {
+            None => api1::parse_topics(body),
+            Some(kind) => parse_feed_body(body, kind),
+        };
+        if !refresh {
+            return self.fetch(&path, endpoint, RESTRICTED_IDS_TTL, parse).await;
+        }
+        match self
+            .refetch(&path, endpoint, RESTRICTED_IDS_TTL, parse)
+            .await
+        {
+            Err(e) => match self.transport.cached(&path) {
+                Some(body) => parse(&body),
+                None => Err(e),
+            },
+            topics => topics,
+        }
     }
 
     async fn node_feed(&self, name: &str, ttl: Duration) -> Result<Vec<Topic>> {
@@ -247,6 +262,22 @@ impl Client {
         let fetched = self.transport.get(path, endpoint, ttl).await?;
         let parsed = parse(&fetched.body).inspect_err(|_| self.transport.forget(path))?;
         Ok((parsed, fetched.fresh))
+    }
+
+    /// Fetches `path` and parses the body, ignoring what is cached. The body replaces the cached
+    /// one only once it parses, so a failed request or an unparseable body leaves the cached
+    /// entry as it was.
+    async fn refetch<T>(
+        &self,
+        path: &str,
+        endpoint: Endpoint,
+        ttl: Duration,
+        parse: impl FnOnce(&[u8]) -> Result<T>,
+    ) -> Result<T> {
+        let body = self.transport.request(path, endpoint).await?;
+        let parsed = parse(&body)?;
+        self.transport.store(path, body, ttl);
+        Ok(parsed)
     }
 }
 

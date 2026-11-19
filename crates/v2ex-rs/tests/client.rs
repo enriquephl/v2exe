@@ -268,6 +268,96 @@ async fn restricted_ids_are_refetched_with_each_fresh_tab_feed() {
     client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
 }
 
+/// Mounts the three restricted-node sources. The nsfw feed lists topic 4001, which `TAB_FEED`
+/// also lists; it answers once with that feed and then with `later`.
+async fn mount_restricted_sources_with_nsfw_then(server: &MockServer, later: ResponseTemplate) {
+    serve(
+        "/api/topics/show.json",
+        &[("node_name", "flamewar")],
+        TOPICS,
+    )
+    .mount(server)
+    .await;
+    serve(
+        "/feed/nsfw.xml",
+        &[],
+        &NODE_FEED.replace("/t/2001#", "/t/4001#"),
+    )
+    .up_to_n_times(1)
+    .expect(1)
+    .mount(server)
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/feed/nsfw.xml"))
+        .respond_with(later)
+        .expect(1..)
+        .mount(server)
+        .await;
+    serve("/feed/sandbox.xml", &[], NODE_FEED)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn failed_refetch_of_a_restricted_source_keeps_its_cached_ids() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .mount(&server)
+        .await;
+    serve("/feed/tab/tech.xml", &[], TAB_FEED)
+        .mount(&server)
+        .await;
+    mount_restricted_sources_with_nsfw_then(&server, ResponseTemplate::new(500)).await;
+    let client = client(&server);
+
+    let first = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+    let second = client
+        .topics(&Listing::Tab("tech".into()), 1)
+        .await
+        .unwrap();
+
+    assert_eq!(ids(&first.items), vec![4002]);
+    assert_eq!(ids(&second.items), vec![4002]);
+}
+
+#[tokio::test]
+async fn unparseable_refetch_of_a_restricted_source_keeps_the_cached_entry() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .mount(&server)
+        .await;
+    serve("/feed/tab/tech.xml", &[], TAB_FEED)
+        .mount(&server)
+        .await;
+    mount_restricted_sources_with_nsfw_then(
+        &server,
+        ResponseTemplate::new(200).set_body_string("<html>busy</html>"),
+    )
+    .await;
+    let client = client(&server);
+
+    client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+    let fresh = client
+        .topics(&Listing::Tab("tech".into()), 1)
+        .await
+        .unwrap();
+    // This feed comes from the cache, so the ids are not fetched again: the entry that the bad
+    // body did not replace does the filtering. The nsfw feed is requested twice in total, once
+    // for `all` and once for the refresh behind `tech`.
+    let cached = client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+
+    assert_eq!(ids(&fresh.items), vec![4002]);
+    assert_eq!(ids(&cached.items), vec![4002]);
+    let nsfw_requests = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == "/feed/nsfw.xml")
+        .count();
+    assert_eq!(nsfw_requests, 2);
+}
+
 #[tokio::test]
 async fn unknown_tab_is_not_found_and_not_cached() {
     let server = MockServer::start().await;
