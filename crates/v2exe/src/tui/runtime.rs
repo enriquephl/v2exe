@@ -20,6 +20,7 @@ use super::app::{App, Cmd, Msg, view};
 use super::theme::Theme;
 use crate::store::favorites::Favorites;
 use crate::store::node_cache::{load_nodes, save_nodes};
+use crate::store::paths::Dirs;
 use crate::store::read_state::ReadState;
 
 /// What a background task that panicked comes back as.
@@ -28,9 +29,14 @@ const TASK_PANICKED: &str = "后台任务意外中止";
 /// Runs the interface until the user quits. The terminal is in raw mode on the alternate screen
 /// meanwhile, and is restored before this returns and before a panic is reported. A panic in a
 /// background task, or a read of the terminal that fails, ends the interface with an error.
+///
+/// The favorites, the read state and the node directory are read before the terminal is
+/// switched, so a file whose read blocks (a FIFO, say) holds up a terminal that is still in its
+/// normal mode, where Ctrl-C ends the program.
 pub async fn run(client: Client, options: Options) -> io::Result<()> {
+    let files = Files::load(&options.dirs);
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
-    let result = run_in(&mut terminal, client, options).await;
+    let result = run_in(&mut terminal, client, options, files).await;
     // The panic hook has restored the terminal when raw mode is already off. Restoring again
     // would leave the alternate screen twice, which moves the cursor back over the panic report.
     if raw_mode() {
@@ -45,6 +51,31 @@ fn raw_mode() -> bool {
     crossterm::terminal::is_raw_mode_enabled().unwrap_or(true)
 }
 
+/// What the interface starts from on disk.
+struct Files {
+    favorites: Favorites,
+    read: ReadState,
+    /// `nodes.json` in the cache directory, when there is one.
+    nodes_path: Option<PathBuf>,
+    /// The node directory in `nodes.json`, while it is fresh.
+    directory: Option<Vec<Node>>,
+}
+
+impl Files {
+    fn load(dirs: &Dirs) -> Files {
+        let state = |name: &str| dirs.state.as_ref().map(|dir| dir.join(name));
+        let nodes_path = dirs.cache.as_ref().map(|dir| dir.join("nodes.json"));
+        Files {
+            favorites: Favorites::load(state("favorites.json")),
+            read: ReadState::load(state("read.json")),
+            directory: nodes_path
+                .as_deref()
+                .and_then(|path| load_nodes(path, Utc::now())),
+            nodes_path,
+        }
+    }
+}
+
 /// Draws a frame, waits for a message, updates the app with it and carries out its commands,
 /// until the app quits. Stops with an error once a panic has restored the terminal, before
 /// drawing over the report.
@@ -52,20 +83,20 @@ async fn run_in(
     terminal: &mut DefaultTerminal,
     client: Client,
     options: Options,
+    files: Files,
 ) -> io::Result<()> {
     let Options {
         start,
         edge,
         color,
         tz,
-        dirs,
+        dirs: _,
     } = options;
-    let state = |name: &str| dirs.state.as_ref().map(|dir| dir.join(name));
     let size = terminal.size()?;
     let (mut app, cmds) = App::new(
         start,
-        Favorites::load(state("favorites.json")),
-        ReadState::load(state("read.json")),
+        files.favorites,
+        files.read,
         (size.width, size.height),
         tz,
     );
@@ -74,9 +105,9 @@ async fn run_in(
     let runner = Runner {
         client,
         tx: tx.clone(),
-        nodes_path: dirs.cache.map(|dir| dir.join("nodes.json")),
+        nodes_path: files.nodes_path,
     };
-    if let Some(nodes) = runner.saved_directory() {
+    if let Some(nodes) = files.directory {
         runner.send(Msg::DirectoryLoaded {
             result: Ok(nodes),
             quota: None,
