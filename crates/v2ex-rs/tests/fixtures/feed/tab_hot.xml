@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>V2EX - 最热 - 2026-11-18</title>
+  <id>https://www.v2ex.com/feed/tab/hot.xml</id>
+  <updated>2026-11-19T03:00:00Z</updated>
+  <link rel="alternate" type="text/html" href="https://www.v2ex.com/?tab=hot" />
+  <link rel="self" type="application/atom+xml" href="https://www.v2ex.com/feed/tab/hot.xml" />
+  <entry>
+    <title>[Python] 标题甲</title>
+    <link rel="alternate" type="text/html" href="https://www.v2ex.com/t/3001#reply8" />
+    <id>tag:www.v2ex.com,2026-11-19:/t/3001</id>
+    <published>2026-11-19T01:00:00Z</published>
+    <updated>2026-11-19T03:00:00Z</updated>
+    <author><name>alice</name><uri>https://www.v2ex.com/member/alice</uri></author>
+    <content type="html" xml:base="https://www.v2ex.com/" xml:lang="en"><![CDATA[<p>正文甲</p>]]></content>
+  </entry>
+  <entry>
+    <title>[🤖Vibe Coding] [求助] 标题乙</title>
+    <link rel="alternate" type="text/html" href="https://www.v2ex.com/t/3002#reply21" />
+    <id>tag:www.v2ex.com,2026-11-19:/t/3002</id>
+    <published>2026-11-19T00:30:00Z</published>
+    <updated>2026-11-19T02:30:00Z</updated>
+    <author><name>bob</name><uri>https://www.v2ex.com/member/bob</uri></author>
+    <content type="html" xml:base="https://www.v2ex.com/" xml:lang="en"><![CDATA[<p>正文乙</p>]]></content>
+  </entry>
+  <entry>
+    <title>[水深火热] 标题丙</title>
+    <link rel="alternate" type="text/html" href="https://www.v2ex.com/t/3003#reply5" />
+    <id>tag:www.v2ex.com,2026-11-19:/t/3003</id>
+    <published>2026-11-18T23:00:00Z</published>
+    <updated>2026-11-19T01:30:00Z</updated>
+    <author><name>carol</name><uri>https://www.v2ex.com/member/carol</uri></author>
+    <content type="html" xml:base="https://www.v2ex.com/" xml:lang="en"><![CDATA[<p>正文丙</p>]]></content>
+  </entry>
+</feed>
