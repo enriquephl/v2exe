@@ -59,6 +59,24 @@ fn char_width(c: char) -> usize {
     c.width().unwrap_or(0)
 }
 
+/// Drops control characters (C0, DEL, C1) and expands tabs to the next multiple
+/// of 4 columns, counted from the start of `s`.
+pub fn sanitize(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut col = 0;
+    for c in s.chars() {
+        if c == '\t' {
+            let n = 4 - col % 4;
+            out.extend(std::iter::repeat_n(' ', n));
+            col += n;
+        } else if !c.is_control() {
+            out.push(c);
+            col += char_width(c);
+        }
+    }
+    out
+}
+
 /// Renders an HTML fragment into logical lines, without wrapping.
 pub fn render_html(html: &str) -> Vec<Line> {
     let doc = Html::parse_fragment(html);
@@ -261,7 +279,8 @@ impl Renderer {
         self.at_space = false;
     }
 
-    /// Adds text with whitespace runs collapsed to one space.
+    /// Adds text with whitespace runs collapsed to one space and other control
+    /// characters dropped.
     fn push_text(&mut self, raw: &str, role: Role) {
         let mut text = String::new();
         let mut at_space = self.at_space;
@@ -271,7 +290,7 @@ impl Renderer {
                     text.push(' ');
                 }
                 at_space = true;
-            } else {
+            } else if !c.is_control() {
                 text.push(c);
                 at_space = false;
             }
@@ -352,12 +371,8 @@ impl Renderer {
             }
             "a" => self.link(el),
             "img" => {
-                if let Some(src) = el
-                    .value()
-                    .attr("src")
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
+                let src = sanitize(el.value().attr("src").unwrap_or("").trim());
+                if !src.is_empty() {
                     let kind = self.text_kind();
                     self.push_line(
                         kind,
@@ -378,12 +393,12 @@ impl Renderer {
         pre_text(el, &mut source);
         let source = source.strip_suffix('\n').unwrap_or(&source);
         for line in source.split('\n') {
-            let line = line.strip_suffix('\r').unwrap_or(line);
+            let line = sanitize(line);
             let segs = if line.is_empty() {
                 Vec::new()
             } else {
                 vec![Seg {
-                    text: line.to_string(),
+                    text: line,
                     role: Role::Code,
                 }]
             };
@@ -424,7 +439,7 @@ impl Renderer {
     }
 
     fn link(&mut self, el: ElementRef) {
-        let href = el.value().attr("href").map(str::trim).unwrap_or("");
+        let href = sanitize(el.value().attr("href").unwrap_or("").trim());
         let wraps_image = el
             .descendants()
             .any(|n| matches!(n.value(), Node::Element(e) if e.name() == "img"));
@@ -433,7 +448,7 @@ impl Renderer {
             return;
         }
         let label = collapse(&el.text().collect::<String>());
-        let label = if label.is_empty() { href } else { &label };
+        let label = if label.is_empty() { &href } else { &label };
         if href.starts_with("/member/") {
             let mut text = String::new();
             if let Some(last) = self.cur.last_mut()
@@ -447,17 +462,18 @@ impl Renderer {
             }
             text.push_str(label);
             self.push_seg(text, Role::Mention);
-        } else if label == href {
-            self.push_seg(href.to_string(), Role::Link);
+        } else if *label == href {
+            self.push_seg(href, Role::Link);
         } else {
             self.push_seg(format!("{label} ({href})"), Role::Link);
         }
     }
 }
 
-/// Trims and collapses whitespace runs to single spaces.
+/// Trims, collapses whitespace runs to single spaces and drops control
+/// characters.
 fn collapse(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    sanitize(&s.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 /// Source text of a `<pre>`, with `<br>` as a newline.

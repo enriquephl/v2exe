@@ -1,4 +1,4 @@
-use v2exe::render::{Line, LineKind, Role, Seg, display_width, render_html, wrap};
+use v2exe::render::{Line, LineKind, Role, Seg, display_width, render_html, sanitize, wrap};
 
 fn texts(l: &[Line]) -> Vec<String> {
     l.iter().map(Line::text).collect()
@@ -222,5 +222,44 @@ fn link_wrapping_an_image_renders_the_image() {
             text: "[图片] https://i.example/a.png".into(),
             role: Role::Image
         }]
+    );
+}
+
+#[test]
+fn sanitize_drops_control_characters() {
+    assert_eq!(sanitize("a\x1b[31mb\x07"), "a[31mb");
+    assert_eq!(sanitize("a\r\n\u{7f}\u{9b}b"), "ab");
+}
+
+#[test]
+fn sanitize_expands_tabs_to_multiples_of_four_columns() {
+    assert_eq!(sanitize("\tx"), "    x");
+    assert_eq!(sanitize("ab\tx"), "ab  x");
+    assert_eq!(sanitize("中\tx"), "中  x");
+}
+
+#[test]
+fn pre_tabs_become_spaces() {
+    let l = render_html("<pre>\tfoo()</pre>");
+    assert_eq!(texts(&l), vec!["    foo()"]);
+    assert_eq!(l[0].kind, LineKind::Code);
+    assert_eq!(display_width(&l[0].text()), 9);
+}
+
+#[test]
+fn control_characters_never_reach_rendered_text() {
+    assert_eq!(texts(&render_html("<p>a\u{009b}b</p>")), vec!["ab"]);
+    assert_eq!(texts(&render_html("<p>a \x1b b</p>")), vec!["a b"]);
+    assert_eq!(texts(&render_html("<pre>x\x1b[2Jy</pre>")), vec!["x[2Jy"]);
+    assert_eq!(texts(&render_html("<code>c\x1bd</code>")), vec!["cd"]);
+    assert_eq!(
+        texts(&render_html(
+            "<a href=\"https://e.example/\x1b\">t\x1bu</a>"
+        )),
+        vec!["tu (https://e.example/)"]
+    );
+    assert_eq!(
+        texts(&render_html("<img src=\"https://e.example/\x1b.png\">")),
+        vec!["[图片] https://e.example/.png"]
     );
 }
