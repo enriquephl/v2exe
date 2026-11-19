@@ -1,0 +1,15 @@
+[package]
+name = "v2ex-rs"
+version = "0.1.0"
+description = "V2EX data layer: topics, replies and nodes from the public API and feeds"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+serde_json = "1.0.154"

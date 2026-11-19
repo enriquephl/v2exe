@@ -18,6 +18,7 @@
 | 路径 | 内容 |
 |---|---|
 | `docs/superpowers/` | spec 与 plan |
+| `crates/v2ex-rs/` | 数据层库：类型、来源、限流、缓存 |
 
 ## Engineering
 
