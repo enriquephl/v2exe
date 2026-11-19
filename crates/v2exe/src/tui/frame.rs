@@ -6,7 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Paragraph};
 
 use super::theme::{Paint, Theme};
 use crate::render::sanitize;
@@ -47,9 +47,10 @@ pub struct Chrome {
 /// The smallest terminal the interface is drawn in: (columns, rows).
 pub const MIN_SIZE: (u16, u16) = (40, 8);
 
-/// Draws the border and returns the area inside it. When the border is too narrow, right-group
-/// segments are dropped from the last one, then hints from the last one; the left group and the
-/// position stay, cut at the corners if they alone are too wide.
+/// Draws the border and returns the area inside it. Right-group segments are dropped from the
+/// last one until at least one border cell is left between the two groups, and hints from the
+/// last one until they fit beside the position; the left group and the position stay, cut at
+/// the corners if they alone are too wide.
 pub fn draw_frame(
     frame: &mut Frame,
     area: Rect,
@@ -67,10 +68,11 @@ pub fn draw_frame(
     inner
 }
 
-/// The one-line notice drawn when the terminal is smaller than [`MIN_SIZE`].
+/// The notice drawn when the terminal is smaller than [`MIN_SIZE`], on the first row and cut at
+/// the area's width.
 pub fn draw_too_small(frame: &mut Frame, area: Rect) {
     let notice = format!("终端太小，至少需要 {}×{}", MIN_SIZE.0, MIN_SIZE.1);
-    frame.render_widget(Paragraph::new(notice).wrap(Wrap { trim: true }), area);
+    frame.render_widget(Paragraph::new(notice), area);
 }
 
 /// Whether the interface can be drawn in `area`.
@@ -167,7 +169,8 @@ fn draw_top(buf: &mut Buffer, area: Rect, chrome: &Chrome, theme: &Theme, edge: 
     let right = right_group(&chrome.right, theme, edge);
     let mut keep = right.len();
     let mut right_width: usize = right.iter().map(|spans| width(spans)).sum();
-    while keep > 0 && left.width() + right_width > avail {
+    // Kept segments leave at least one border cell before the right group.
+    while keep > 0 && left.width() + right_width >= avail {
         keep -= 1;
         right_width -= width(&right[keep]);
     }
@@ -425,6 +428,35 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(39, 8)).unwrap();
         terminal.draw(|f| draw_too_small(f, f.area())).unwrap();
         assert!(row(terminal.backend().buffer(), 0).contains("终端太小，至少需要 40×8"));
+    }
+
+    #[test]
+    fn the_too_small_notice_stays_on_one_row() {
+        for (w, first) in [(10, "终端太小，"), (9, "终端太小 "), (1, " ")] {
+            let mut terminal = Terminal::new(TestBackend::new(w, 3)).unwrap();
+            terminal.draw(|f| draw_too_small(f, f.area())).unwrap();
+            let buf = terminal.backend().buffer();
+            assert_eq!(row(buf, 0), first, "width {w}");
+            for y in 1..3 {
+                assert_eq!(row(buf, y).trim(), "", "width {w}, row {y}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_top_groups_keep_a_border_cell_between_them() {
+        let a = "a".repeat(20);
+        let mut c = chrome();
+        c.left = vec![seg("V2EX", Tone::Site)];
+        // 6 + 22 + 9 columns of the 38 between the corners: one border cell is left.
+        c.right = vec![seg(&a, Tone::Ok), seg("bbbbbbb", Tone::Identity)];
+        let (buf, _) = draw(40, 8, &c, true, SegmentEdge::Plain);
+        assert_eq!(row(&buf, 0), format!("╭ V2EX ─ {a}  bbbbbbb ╮"));
+
+        // 6 + 22 + 10: no border cell would be left, so the last segment goes.
+        c.right[1] = seg("bbbbbbbb", Tone::Identity);
+        let (buf, _) = draw(40, 8, &c, true, SegmentEdge::Plain);
+        assert_eq!(row(&buf, 0), format!("╭ V2EX {} {a} ╮", "─".repeat(10)));
     }
 
     #[test]
