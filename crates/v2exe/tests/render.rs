@@ -225,6 +225,50 @@ fn link_wrapping_an_image_renders_the_image() {
     );
 }
 
+/// Runs `f` on a thread with a stack too small for one frame per nesting level.
+fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(f)
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+#[test]
+fn deep_nesting_keeps_the_text_without_recursing() {
+    let nested = |tag: &str, body: &str| {
+        format!(
+            "{}{body}{}",
+            format!("<{tag}>").repeat(10_000),
+            format!("</{tag}>").repeat(10_000)
+        )
+    };
+    let blocks = nested("blockquote", "深处");
+    let code = format!("<pre>{}</pre>", nested("span", "x = 1"));
+
+    let lines = on_small_stack(move || (render_html(&blocks), render_html(&code)));
+
+    assert_eq!(texts(&lines.0), vec!["深处"]);
+    assert_eq!(texts(&lines.1), vec!["x = 1"]);
+}
+
+#[test]
+fn wrap_handles_a_very_long_token() {
+    let line = Line {
+        kind: LineKind::Text,
+        segs: vec![Seg {
+            text: "a".repeat(400_000),
+            role: Role::Plain,
+        }],
+    };
+
+    let wrapped = wrap(&[line], 80);
+
+    assert_eq!(wrapped.len(), 5_000);
+    assert!(wrapped.iter().all(|l| display_width(&l.text()) == 80));
+}
+
 #[test]
 fn sanitize_drops_control_characters() {
     assert_eq!(sanitize("a\x1b[31mb\x07"), "a[31mb");

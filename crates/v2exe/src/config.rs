@@ -31,11 +31,11 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-/// `<xdg_config_home>/v2exe/config.toml` when it is set and non-empty, otherwise
+/// `<xdg_config_home>/v2exe/config.toml` when it is an absolute path, otherwise
 /// `<home>/.config/v2exe/config.toml`.
 pub fn config_path_from(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
-    let base = match xdg_config_home.filter(|x| !x.is_empty()) {
-        Some(xdg) => PathBuf::from(xdg),
+    let base = match xdg_config_home.map(Path::new).filter(|x| x.is_absolute()) {
+        Some(xdg) => xdg.to_path_buf(),
         None => Path::new(home?).join(".config"),
     };
     Some(base.join("v2exe").join("config.toml"))
@@ -146,6 +146,10 @@ mod tests {
         );
         assert_eq!(
             config_path_from(Some("".as_ref()), Some("/h".as_ref())),
+            Some("/h/.config/v2exe/config.toml".into())
+        );
+        assert_eq!(
+            config_path_from(Some("relative".as_ref()), Some("/h".as_ref())),
             Some("/h/.config/v2exe/config.toml".into())
         );
         assert_eq!(config_path_from(None, None), None);

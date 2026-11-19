@@ -14,6 +14,7 @@ use super::exit::{exit_code, message};
 use super::output::{self, Painter};
 use super::topic_ref::parse_topic_ref;
 use crate::config::{self, Config};
+use crate::render::sanitize;
 
 /// What the process environment decides: where the settings file is, whether to color and wrap
 /// the text, and the offset times are shown in.
@@ -63,8 +64,9 @@ impl Failure {
         }
     }
 
+    /// The error's text can quote the server, so it is sanitized like any other output.
     fn from_error(e: &v2ex_rs::Error, tz: &FixedOffset) -> Failure {
-        Failure::new(exit_code(e), message(e, tz))
+        Failure::new(exit_code(e), sanitize(&message(e, tz)))
     }
 }
 
@@ -220,7 +222,20 @@ fn write_out(out: &mut dyn Write, text: &str) -> Result<(), Failure> {
 
 #[cfg(test)]
 mod tests {
-    use super::color_enabled;
+    use chrono::FixedOffset;
+    use v2ex_rs::Error;
+
+    use super::{Failure, color_enabled};
+
+    #[test]
+    fn error_text_from_the_server_loses_its_control_characters() {
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let error = Error::Decode("bad \x1b[31m\u{9b}2J tag".into());
+
+        let failure = Failure::from_error(&error, &tz);
+
+        assert_eq!(failure.message, "无法解析站点的响应：bad [31m2J tag");
+    }
 
     #[test]
     fn only_a_non_empty_no_color_turns_color_off() {

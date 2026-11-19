@@ -77,6 +77,10 @@ pub fn sanitize(s: &str) -> String {
     out
 }
 
+/// Elements nested deeper than this are not walked one by one; their text is kept as plain
+/// inline text, so the walk's recursion stays shallow whatever the HTML.
+const MAX_DEPTH: usize = 64;
+
 /// Renders an HTML fragment into logical lines, without wrapping.
 pub fn render_html(html: &str) -> Vec<Line> {
     let doc = Html::parse_fragment(html);
@@ -110,9 +114,12 @@ fn wrap_line(line: &Line, width: usize, out: &mut Vec<Line>) {
         .enumerate()
         .flat_map(|(i, s)| s.text.chars().map(move |c| (c, i)))
         .collect();
+    let cells_width =
+        |cells: &[(char, usize)]| -> usize { cells.iter().map(|(c, _)| char_width(*c)).sum() };
+    // Width of everything from `start` on.
+    let mut rest = cells_width(&cells);
     let mut start = 0;
     while start < cells.len() {
-        let rest: usize = cells[start..].iter().map(|(c, _)| char_width(*c)).sum();
         if rest <= width {
             out.push(piece(line, &cells[start..]));
             return;
@@ -137,6 +144,7 @@ fn wrap_line(line: &Line, width: usize, out: &mut Vec<Line>) {
             i += 1;
         };
         out.push(piece(line, &cells[start..end]));
+        rest -= cells_width(&cells[start..next]);
         start = next;
     }
 }
@@ -179,6 +187,8 @@ struct Renderer {
     bold: usize,
     quote: usize,
     lists: Vec<List>,
+    /// How many elements deep the walk is.
+    depth: usize,
 }
 
 impl Renderer {
@@ -192,6 +202,7 @@ impl Renderer {
             bold: 0,
             quote: 0,
             lists: Vec::new(),
+            depth: 0,
         }
     }
 
@@ -314,11 +325,7 @@ impl Renderer {
         for child in el.children() {
             match child.value() {
                 Node::Text(t) => {
-                    let role = if self.bold > 0 {
-                        Role::Bold
-                    } else {
-                        Role::Plain
-                    };
+                    let role = self.text_role();
                     self.push_text(t, role);
                 }
                 Node::Element(_) => {
@@ -332,6 +339,27 @@ impl Renderer {
     }
 
     fn element(&mut self, el: ElementRef) {
+        if self.depth == MAX_DEPTH {
+            let role = self.text_role();
+            for text in el.text() {
+                self.push_text(text, role.clone());
+            }
+            return;
+        }
+        self.depth += 1;
+        self.dispatch(el);
+        self.depth -= 1;
+    }
+
+    fn text_role(&self) -> Role {
+        if self.bold > 0 {
+            Role::Bold
+        } else {
+            Role::Plain
+        }
+    }
+
+    fn dispatch(&mut self, el: ElementRef) {
         match el.value().name() {
             "p" | "div" => {
                 self.open_block();
@@ -389,8 +417,7 @@ impl Renderer {
 
     fn pre(&mut self, el: ElementRef) {
         self.open_block();
-        let mut source = String::new();
-        pre_text(el, &mut source);
+        let source = pre_text(el);
         let source = source.strip_suffix('\n').unwrap_or(&source);
         for line in source.split('\n') {
             let line = sanitize(line);
@@ -477,17 +504,14 @@ fn collapse(s: &str) -> String {
 }
 
 /// Source text of a `<pre>`, with `<br>` as a newline.
-fn pre_text(el: ElementRef, out: &mut String) {
-    for child in el.children() {
-        match child.value() {
+fn pre_text(el: ElementRef) -> String {
+    let mut out = String::new();
+    for node in el.descendants() {
+        match node.value() {
             Node::Text(t) => out.push_str(t),
             Node::Element(e) if e.name() == "br" => out.push('\n'),
-            Node::Element(_) => {
-                if let Some(e) = ElementRef::wrap(child) {
-                    pre_text(e, out);
-                }
-            }
             _ => {}
         }
     }
+    out
 }

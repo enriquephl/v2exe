@@ -70,7 +70,7 @@ impl Client {
             .api_topics(&format!("/api/topics/show.json?id={id}"), TOPICS_TTL)
             .await?
             .into_iter()
-            .next()
+            .find(|t| t.id == id)
             .ok_or(Error::NotFound)?;
         match topic.node.as_ref().and_then(restricted::of) {
             Some(node) => Err(restricted_error(node.name)),
@@ -84,11 +84,8 @@ impl Client {
     pub async fn replies(&self, topic_id: u64, page: u32) -> Result<Page<Reply>> {
         let items = if page == 1 {
             let path = format!("/api/replies/show.json?topic_id={topic_id}");
-            let body = self
-                .transport
-                .get(&path, Endpoint::Api, REPLIES_TTL)
-                .await?;
-            api1::parse_replies(&body)?
+            self.fetch(&path, Endpoint::Api, REPLIES_TTL, api1::parse_replies)
+                .await?
         } else {
             Vec::new()
         };
@@ -107,8 +104,9 @@ impl Client {
             return Err(restricted_error(name));
         }
         let path = format!("/api/nodes/show.json?name={}", encode(name));
-        let body = self.transport.get(&path, Endpoint::Api, NODE_TTL).await?;
-        let node = api1::parse_node(&body)?;
+        let node = self
+            .fetch(&path, Endpoint::Api, NODE_TTL, api1::parse_node)
+            .await?;
         if restricted::by_name(&node.name).is_some() {
             return Err(restricted_error(name));
         }
@@ -117,11 +115,14 @@ impl Client {
 
     /// Fetches the node directory, without restricted nodes.
     pub async fn nodes(&self) -> Result<Vec<Node>> {
-        let body = self
-            .transport
-            .get("/api/nodes/all.json", Endpoint::Api, NODES_TTL)
+        let mut nodes = self
+            .fetch(
+                "/api/nodes/all.json",
+                Endpoint::Api,
+                NODES_TTL,
+                api1::parse_nodes,
+            )
             .await?;
-        let mut nodes = api1::parse_nodes(&body)?;
         nodes.retain(|n| restricted::by_name(&n.name).is_none());
         Ok(nodes)
     }
@@ -143,15 +144,14 @@ impl Client {
                 self.api_topics("/api/topics/latest.json", TOPICS_TTL)
                     .await?
             }
-            Listing::Tab(tab) if tab.eq_ignore_ascii_case("hot") => {
-                self.feed_topics("/feed/tab/hot.xml", &FeedKind::Prefixed, TOPICS_TTL)
-                    .await?
-            }
             Listing::Tab(tab) => {
-                let path = format!("/feed/tab/{}.xml", encode(tab));
-                let mut topics = self
-                    .feed_topics(&path, &FeedKind::Plain, TOPICS_TTL)
-                    .await?;
+                // Only the hot tab names each topic's node, in a title prefix.
+                let (path, kind) = if tab.eq_ignore_ascii_case("hot") {
+                    ("/feed/tab/hot.xml".to_string(), FeedKind::Prefixed)
+                } else {
+                    (format!("/feed/tab/{}.xml", encode(tab)), FeedKind::Plain)
+                };
+                let mut topics = self.feed_topics(&path, &kind, TOPICS_TTL).await?;
                 let hidden = self.restricted_ids().await;
                 topics.retain(|t| !hidden.contains(&t.id));
                 topics
@@ -170,7 +170,8 @@ impl Client {
             }
         };
         // Hot, latest and the hot tab name each topic's node; the other listings carry none that
-        // is restricted.
+        // is restricted. Tab feeds are also filtered by id above, which does not depend on the
+        // feed's title format.
         topics.retain(|t| !is_restricted(t));
         Ok(topics)
     }
@@ -200,13 +201,28 @@ impl Client {
     }
 
     async fn api_topics(&self, path: &str, ttl: Duration) -> Result<Vec<Topic>> {
-        let body = self.transport.get(path, Endpoint::Api, ttl).await?;
-        api1::parse_topics(&body)
+        self.fetch(path, Endpoint::Api, ttl, api1::parse_topics)
+            .await
     }
 
     async fn feed_topics(&self, path: &str, kind: &FeedKind, ttl: Duration) -> Result<Vec<Topic>> {
-        let body = self.transport.get(path, Endpoint::Feed, ttl).await?;
-        feed::parse_feed(&body, kind)
+        self.fetch(path, Endpoint::Feed, ttl, |body| {
+            feed::parse_feed(body, kind)
+        })
+        .await
+    }
+
+    /// Fetches `path` and parses the body. A body that does not parse is dropped from the cache,
+    /// so the next call asks the server again.
+    async fn fetch<T>(
+        &self,
+        path: &str,
+        endpoint: Endpoint,
+        ttl: Duration,
+        parse: impl FnOnce(&[u8]) -> Result<T>,
+    ) -> Result<T> {
+        let body = self.transport.get(path, endpoint, ttl).await?;
+        parse(&body).inspect_err(|_| self.transport.forget(path))
     }
 }
 

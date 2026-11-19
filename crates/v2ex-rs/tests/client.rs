@@ -197,6 +197,23 @@ async fn hot_tab_drops_restricted_titles() {
 }
 
 #[tokio::test]
+async fn hot_tab_also_drops_recent_restricted_ids() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/hot.xml", &[], TAB_HOT_FEED)
+        .mount(&server)
+        .await;
+    let nsfw = NODE_FEED.replace("/t/2001#", "/t/3001#");
+    serve("/feed/nsfw.xml", &[], &nsfw).mount(&server).await;
+
+    let p = client(&server)
+        .topics(&Listing::Tab("hot".into()), 1)
+        .await
+        .unwrap();
+
+    assert_eq!(titles(&p.items), vec!["[求助] 标题乙"]);
+}
+
+#[tokio::test]
 async fn plain_tab_drops_recent_restricted_ids_and_skips_failed_sources() {
     let server = MockServer::start().await;
     serve("/feed/tab/all.xml", &[], TAB_FEED)
@@ -290,6 +307,37 @@ async fn unknown_topic_is_not_found() {
     let result = client(&server).topic(999).await;
 
     assert!(matches!(result, Err(Error::NotFound)));
+}
+
+#[tokio::test]
+async fn a_response_for_another_topic_is_not_found() {
+    let server = MockServer::start().await;
+    serve("/api/topics/show.json", &[("id", "1002")], TOPIC)
+        .mount(&server)
+        .await;
+
+    let result = client(&server).topic(1002).await;
+
+    assert!(matches!(result, Err(Error::NotFound)));
+}
+
+#[tokio::test]
+async fn an_undecodable_response_is_not_cached() {
+    let server = MockServer::start().await;
+    serve("/api/topics/hot.json", &[], "<html>busy</html>")
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    serve("/api/topics/hot.json", &[], TOPICS)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+
+    let first = client.topics(&Listing::Hot, 1).await;
+    let second = client.topics(&Listing::Hot, 1).await;
+
+    assert!(matches!(first, Err(Error::Decode(_))));
+    assert!(!second.unwrap().items.is_empty());
 }
 
 #[tokio::test]

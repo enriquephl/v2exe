@@ -61,7 +61,12 @@ impl Transport {
     pub(crate) fn new(s: &Settings) -> Result<Transport> {
         let base_url = reqwest::Url::parse(&s.base_url)
             .ok()
-            .filter(|u| matches!(u.scheme(), "http" | "https") && u.has_host())
+            .filter(|u| {
+                matches!(u.scheme(), "http" | "https")
+                    && u.has_host()
+                    && u.query().is_none()
+                    && u.fragment().is_none()
+            })
             .map(|_| s.base_url.trim_end_matches('/').to_string())
             .ok_or_else(|| Error::Config(format!("invalid base URL: {}", s.base_url)))?;
 
@@ -120,6 +125,11 @@ impl Transport {
 
     pub(crate) fn clear_cache(&self) {
         lock(&self.inner.cache).clear();
+    }
+
+    /// Drops the cached body of `path`, for a body that turned out to be unusable.
+    pub(crate) fn forget(&self, path: &str) {
+        lock(&self.inner.cache).remove(path);
     }
 
     fn cached(&self, path: &str) -> Option<Bytes> {
@@ -636,8 +646,14 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_base_url_is_config_error() {
-        let result = Transport::new(&settings("not a url".to_string()));
+        for url in [
+            "not a url",
+            "https://www.v2ex.com/#x",
+            "https://www.v2ex.com/?x=1",
+        ] {
+            let result = Transport::new(&settings(url.to_string()));
 
-        assert!(matches!(result, Err(Error::Config(_))));
+            assert!(matches!(result, Err(Error::Config(_))), "{url}");
+        }
     }
 }
