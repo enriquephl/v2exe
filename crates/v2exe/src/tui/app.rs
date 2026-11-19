@@ -177,7 +177,9 @@ impl App {
                 self.clamp_lists();
                 Vec::new()
             }
-            // As with the topics, only the reader still waiting for this ticket takes it.
+            // As with the topics, only the reader still waiting for this ticket takes it. A topic
+            // is recorded as read here only, once its thread has arrived, with the larger of its
+            // reply count (what the lists compare against) and the number of replies that came.
             Msg::ThreadLoaded {
                 ticket,
                 result,
@@ -197,7 +199,8 @@ impl App {
                 screen.pending = None;
                 match result {
                     Ok((topic, replies)) => {
-                        self.read.record(screen.id, replies.len() as u32, now);
+                        let count = topic.replies.max(replies.len() as u32);
+                        self.read.record(screen.id, count, now);
                         screen.topic = Some(topic);
                         screen.replies = replies;
                         screen.reflow(width, page, &self.tz);
@@ -303,16 +306,14 @@ impl App {
     }
 
     /// Opens topic `id` from a topic list that shows it with `replies` replies: notes how many
-    /// of them are new since it was last recorded, records it and pushes its reader.
-    pub(super) fn open_from_list(&mut self, id: u64, replies: u32, now: DateTime<Utc>) -> Vec<Cmd> {
+    /// of them are new since it was last recorded and pushes its reader. The topic is recorded
+    /// once its thread has loaded.
+    pub(super) fn open_from_list(&mut self, id: u64, replies: u32) -> Vec<Cmd> {
         let new_replies = match self.read.mark(id, replies) {
             Mark::Updated(n) => n,
             Mark::Unread | Mark::Read => 0,
         };
-        self.read.record(id, replies, now);
-        let mut cmds = self.open_topic(id, new_replies);
-        cmds.push(Cmd::SaveRead);
-        cmds
+        self.open_topic(id, new_replies)
     }
 
     fn key(&mut self, key: KeyEvent, now: DateTime<Utc>) -> Vec<Cmd> {
@@ -323,7 +324,7 @@ impl App {
         match self.stack.last() {
             Some(Screen::Nodes(_)) => return self.nodes_key(key),
             Some(Screen::Topics(_)) => return self.topics_key(key, now),
-            Some(Screen::Reader(_)) => return self.reader_key(key, now),
+            Some(Screen::Reader(_)) => return self.reader_key(key),
             Some(Screen::Help(_)) => self.help_key(key),
             None => {}
         }
@@ -1175,6 +1176,50 @@ mod tests {
     }
 
     #[test]
+    fn a_topic_whose_first_load_fails_stays_unread() {
+        let mut app = listing(vec![
+            topic(1, "示例一", "alice", 1),
+            topic(2, "示例二", "bob", 2),
+        ]);
+        let opens = [
+            (KeyCode::Enter, Error::Network("连接超时".into())),
+            (
+                KeyCode::Char(']'),
+                Error::Restricted {
+                    node: "示例节点".into(),
+                },
+            ),
+        ];
+        for (key, error) in opens {
+            assert!(!code(&mut app, key).contains(&Cmd::SaveRead), "{key:?}");
+            let ticket = reader_screen(&app).pending.unwrap();
+            assert!(
+                app.update(thread_loaded(ticket, Err(error)), now())
+                    .is_empty()
+            );
+        }
+        assert_eq!(app.read.mark(1, 1), Mark::Unread);
+        assert_eq!(app.read.mark(2, 2), Mark::Unread);
+    }
+
+    #[test]
+    fn a_loaded_thread_is_recorded_with_the_larger_reply_count() {
+        // The list counts 5 replies; the thread comes with 3 of them.
+        let mut app = listing(vec![topic(1, "示例", "alice", 5)]);
+        code(&mut app, KeyCode::Enter);
+        let replies = (1..=3).map(|i| reply(i, "bob", "第一则")).collect();
+        let cmds = load_thread(&mut app, topic(1, "示例", "alice", 5), replies);
+        assert_eq!(cmds, [Cmd::SaveRead]);
+        assert_eq!(app.read.mark(1, 5), Mark::Read);
+
+        // The thread comes with more replies than its count.
+        let (mut app, _) = launch(Start::Topic(1));
+        let replies = (1..=3).map(|i| reply(i, "bob", "第一则")).collect();
+        load_thread(&mut app, topic(1, "示例", "alice", 1), replies);
+        assert_eq!(app.read.mark(1, 3), Mark::Read);
+    }
+
+    #[test]
     fn a_failed_load_keeps_what_was_shown() {
         let mut app = reading(long_topic(1, 30), vec![reply(1, "bob", "第一则")]);
         let shown = reader_screen(&app).layout.clone();
@@ -1346,16 +1391,12 @@ mod tests {
         let ticket = reader.pending.unwrap();
         assert_eq!(
             cmds,
-            [
-                Cmd::LoadThread {
-                    ticket,
-                    id: 2,
-                    refresh: false
-                },
-                Cmd::SaveRead
-            ]
+            [Cmd::LoadThread {
+                ticket,
+                id: 2,
+                refresh: false
+            }]
         );
-        assert_eq!(app.read.mark(2, 1), Mark::Read);
         // The result for the reader that was replaced is dropped.
         let late = Ok((topic(1, "示例", "alice", 1), Vec::new()));
         assert!(app.update(thread_loaded(first, late), now()).is_empty());
@@ -1525,11 +1566,11 @@ mod tests {
         app.read.record(2, 1, now());
         code(&mut app, KeyCode::Enter);
         assert_eq!(reader_screen(&app).new_replies, 3);
-        assert_eq!(app.read.mark(1, 8), Mark::Read);
 
-        // ] and [ count the same way; an unread or a read topic has none new.
+        // ] and [ count the same way; an unread topic, or one read since, has none new.
         code(&mut app, KeyCode::Char(']'));
         assert_eq!(reader_screen(&app).new_replies, 3);
+        load_thread(&mut app, topic(2, "示例二", "bob", 4), Vec::new());
         code(&mut app, KeyCode::Char(']'));
         assert_eq!(reader_screen(&app).new_replies, 0);
         code(&mut app, KeyCode::Char('['));

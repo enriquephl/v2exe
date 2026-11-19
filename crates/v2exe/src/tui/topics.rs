@@ -226,7 +226,7 @@ impl App {
                 Vec::new()
             }
             Nav::Open => match screen.current().map(|t| (t.id, t.replies)) {
-                Some((id, replies)) => self.open_from_list(id, replies, now),
+                Some((id, replies)) => self.open_from_list(id, replies),
                 None => Vec::new(),
             },
             Nav::Back => {
@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_a_topic_records_it_and_marks_follow() {
+    fn an_opened_topic_is_recorded_once_its_thread_loads_and_marks_follow() {
         let mut app = listing(vec![
             topic(1, "示例一", "alice", 5),
             topic(2, "示例二", "bob", 0),
@@ -560,15 +560,16 @@ mod tests {
         assert_eq!(reader.id, 1);
         assert_eq!(
             cmds,
-            [
-                Cmd::LoadThread {
-                    ticket: reader.pending.unwrap(),
-                    id: 1,
-                    refresh: false
-                },
-                Cmd::SaveRead
-            ]
+            [Cmd::LoadThread {
+                ticket: reader.pending.unwrap(),
+                id: 1,
+                refresh: false
+            }]
         );
+        assert_eq!(app.read.mark(1, 5), Mark::Unread);
+        let replies = (1..=5).map(|i| reply(i, "bob", "第一则")).collect();
+        let cmds = load_thread(&mut app, topic(1, "示例一", "alice", 5), replies);
+        assert_eq!(cmds, [Cmd::SaveRead]);
         assert_eq!(app.read.mark(1, 5), Mark::Read);
 
         code(&mut app, KeyCode::Left);

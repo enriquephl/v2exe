@@ -297,7 +297,7 @@ impl ReaderScreen {
 
 impl App {
     /// A key while the reader is on top.
-    pub(super) fn reader_key(&mut self, key: KeyEvent, now: DateTime<Utc>) -> Vec<Cmd> {
+    pub(super) fn reader_key(&mut self, key: KeyEvent) -> Vec<Cmd> {
         let page = self.inner_height();
         let Some(Screen::Reader(screen)) = self.stack.last_mut() else {
             return Vec::new();
@@ -348,7 +348,7 @@ impl App {
             KeyCode::Char(c) if plain => match c {
                 'k' => scroll.saturating_sub(1),
                 'j' => scroll + 1,
-                ' ' if scroll == last && shown => return self.walk(true, now),
+                ' ' if scroll == last && shown => return self.walk(true),
                 ' ' => scroll + page,
                 'g' => 0,
                 'G' => last,
@@ -367,8 +367,8 @@ impl App {
                     });
                     return Vec::new();
                 }
-                ']' => return self.walk(true, now),
-                '[' => return self.walk(false, now),
+                ']' => return self.walk(true),
+                '[' => return self.walk(false),
                 'o' => {
                     return match &screen.topic {
                         Some(topic) => vec![Cmd::OpenUrl(topic.url.clone())],
@@ -406,7 +406,7 @@ impl App {
     /// When a topic list is right under the reader on top, opens the topic after (`forward`) or
     /// before the reader's among the list's rows in place of the reader, and moves the list's
     /// cursor to it. Nothing happens at either end of the rows or without such a list.
-    fn walk(&mut self, forward: bool, now: DateTime<Utc>) -> Vec<Cmd> {
+    fn walk(&mut self, forward: bool) -> Vec<Cmd> {
         let page = self.topics_page();
         let [.., Screen::Topics(list), Screen::Reader(reader)] = self.stack.as_mut_slice() else {
             return Vec::new();
@@ -431,7 +431,7 @@ impl App {
         list.nav.cursor = target;
         list.nav.clamp(len, page);
         self.stack.pop();
-        self.open_from_list(id, replies, now)
+        self.open_from_list(id, replies)
     }
 }
 

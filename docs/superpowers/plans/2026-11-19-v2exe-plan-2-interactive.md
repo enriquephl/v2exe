@@ -670,7 +670,7 @@ pub fn resolve(input: &str, directory: Option<&[Node]>) -> Option<(Listing, Stri
 行为：
 
 - `TopicsLoaded`：票号等于 `pending` 才收下，否则丢弃。成功则替换 `topics`、清 `pending`、清 `App::error`，并 `clamp`；失败则保留原有 `topics`、清 `pending`、把原因写进 `App::error`（文字用 `cli::exit::message` 同一套措辞；把那个函数移到 `tui` 与 `cli` 都能引用而不互相依赖的位置，如 `crate::errors`）。`quota` 为 Some 时更新 `App::quota`。
-- `→` `Enter` `l`：压入阅读页并发 `LoadThread`；同时 `read.record(id, 列表里的回复数, now)` 并发 `SaveRead`。
+- `→` `Enter` `l`：压入阅读页并发 `LoadThread`，`new_replies` 由 `read.mark(id, 列表里的回复数)` 算出。打开时不记已读，帖子载入成功时才记（Task 7 的 `ThreadLoaded`）。
 - `v`：该行是 `Unread` 时记为已读，否则 `forget`；发 `SaveRead`。
 - `a`：按该行的作者过滤；已在按作者过滤时再按一次取消。`/` 按标题过滤，规则同节点列表。有任一过滤时 `←` `q` `h` 先清过滤。
 - `o`：发 `OpenUrl(该行的 url)`。`r`：新票号，发 `LoadTopics { refresh: true }`。
@@ -700,9 +700,9 @@ fn a_failed_reload_keeps_the_topics_and_reports_the_reason() {
     // topics 仍是 3 条；App::error 含「额度」；随后一次 Ok 清掉 error
 }
 #[test]
-fn opening_a_topic_records_it_and_marks_follow() {
+fn an_opened_topic_is_recorded_once_its_thread_loads_and_marks_follow() {
     // 3 条帖子（回复数 5、0、12）：counts == (3, 0)
-    // 在第一条上按 Enter：栈顶是 Reader，Cmd 含 LoadThread { id } 与 SaveRead；返回后 counts == (2, 0)
+    // 在第一条上按 Enter：栈顶是 Reader，Cmd 只有 LoadThread { id }，仍是未读；ThreadLoaded Ok 之后 Cmd 是 SaveRead；返回后 counts == (2, 0)
     // 重新加载后第一条回复数变 8：counts == (2, 1)
 }
 #[test]
@@ -799,11 +799,11 @@ impl ReaderScreen { pub fn new(id: u64, ticket: u64, new_replies: u32) -> Reader
 
 行为：
 
-- `ThreadLoaded`：票号等于 `pending` 才收下。成功则存下帖子与回复、按当前宽度 `layout`、`read.record(id, 回复的条数, now)` 并发 `SaveRead`；失败保留已有内容并写 `App::error`。
+- `ThreadLoaded`：票号等于 `pending` 才收下。成功则存下帖子与回复、按当前宽度 `layout`、`read.record(id, max(topic.replies, 回复的条数), now)` 并发 `SaveRead`；失败保留已有内容并写 `App::error`，不记已读。已读只在这里记：载入失败的帖子仍是未读；取两个数里较大的，是因为列表拿 `topic.replies` 来比，记得比它小就会一直显示 `~`。
 - `Resize` 后按新宽度重新 `layout`，`scroll` 收回到合法范围。
 - `↑` `k` / `↓` `j` 滚一行；`空格` `PgDn` `Ctrl-F` / `PgUp` `Ctrl-B` 翻一页（框内高度）；`Home` `g` / `End` `G` 到顶到底。`scroll` 的最大值是 `行数 - 框内高度`（不小于 0）。
 - 已经在末尾时按 `空格`：等同 `]`。
-- `]` / `[`：栈里紧挨着的下一层是帖子列表时，取它当前可见行里的下一篇 / 上一篇，把那个列表的游标移过去，用新的阅读页替换栈顶并发 `LoadThread`（同时像从列表打开一样 `record`）。已经是最后一篇 / 第一篇，或下面不是帖子列表时无动作。
+- `]` / `[`：栈里紧挨着的下一层是帖子列表时，取它当前可见行里的下一篇 / 上一篇，把那个列表的游标移过去，用新的阅读页替换栈顶并发 `LoadThread`（像从列表打开一样算 `new_replies`，不记已读）。已经是最后一篇 / 第一篇，或下面不是帖子列表时无动作。
 - 数字后 `Enter`：滚到该楼层那一块的第一行；楼层不存在时不动。
 - `/` 打开查找输入，`Enter` 后滚到从当前位置往下第一处包含该文字的行（不分大小写）；`n` 下一处，`N` 上一处；到头不绕回；没有匹配时不动。匹配的行整行反白。
 - `o`：`OpenUrl(帖子的 url)`。`r`：新票号，`LoadThread { refresh: true }`。`←` `q` `h` 返回。
