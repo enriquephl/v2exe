@@ -152,7 +152,7 @@ impl RawNode {
             topics: self.topics,
             stars: self.stars,
             header: non_empty(self.header),
-            parent_node_name: self.parent_node_name,
+            parent_node_name: non_empty(self.parent_node_name),
         }
     }
 }
@@ -249,6 +249,17 @@ mod tests {
             }
         );
         assert!(r[0].content_html.contains("href=\"/member/alice\""));
+    }
+
+    #[test]
+    fn parse_node_turns_empty_strings_into_none() {
+        let body = br#"{"id": 1, "name": "x", "title": "X", "title_alternative": "",
+            "topics": 0, "stars": 0, "header": "", "parent_node_name": ""}"#;
+        let n = parse_node(body).unwrap();
+        assert_eq!(
+            (n.title_alternative, n.header, n.parent_node_name),
+            (None, None, None)
+        );
     }
 
     #[test]
