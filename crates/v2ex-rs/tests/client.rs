@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use v2ex_rs::{Client, Error, Listing, Topic};
 use wiremock::matchers::{any, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -266,6 +268,46 @@ async fn restricted_ids_are_refetched_with_each_fresh_tab_feed() {
         .await
         .unwrap();
     client.topics(&Listing::Tab("all".into()), 1).await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_tab_loads_both_wait_for_the_restricted_ids() {
+    let server = MockServer::start().await;
+    serve("/feed/tab/all.xml", &[], TAB_FEED)
+        .expect(1)
+        .mount(&server)
+        .await;
+    serve(
+        "/api/topics/show.json",
+        &[("node_name", "flamewar")],
+        TOPICS,
+    )
+    .mount(&server)
+    .await;
+    // The nsfw feed lists topic 4001, which `TAB_FEED` also lists, and answers late.
+    Mock::given(method("GET"))
+        .and(path("/feed/nsfw.xml"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(NODE_FEED.replace("/t/2001#", "/t/4001#"))
+                .set_delay(Duration::from_millis(500)),
+        )
+        .mount(&server)
+        .await;
+    serve("/feed/sandbox.xml", &[], NODE_FEED)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+    let listing = Listing::Tab("all".into());
+
+    // The second load starts while the first waits for the nsfw feed.
+    let (first, second) = tokio::join!(client.topics(&listing, 1), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        client.topics(&listing, 1).await
+    });
+
+    assert_eq!(ids(&first.unwrap().items), vec![4002]);
+    assert_eq!(ids(&second.unwrap().items), vec![4002]);
 }
 
 /// Mounts the three restricted-node sources. The nsfw feed lists topic 4001, which `TAB_FEED`

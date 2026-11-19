@@ -26,7 +26,7 @@ const NAME_ESCAPES: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'~');
 
 /// Cheap to clone; clones share one connection pool, cache, quota record and set of restricted
-/// ids.
+/// ids, and take turns at tab listings.
 #[derive(Clone)]
 pub struct Client {
     transport: Transport,
@@ -34,6 +34,9 @@ pub struct Client {
     /// that succeeded. Kept apart from the response cache: [`Client::clear_cache`] leaves them,
     /// and they do not expire.
     restricted_ids: Arc<Mutex<HashMap<&'static str, HashSet<u64>>>>,
+    /// Held for the whole of a tab listing (feed, id refetch, filtering), so tab listings run
+    /// one at a time and each filters with the ids that go with its feed.
+    tab_turn: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub struct ClientBuilder {
@@ -152,6 +155,7 @@ impl Client {
                     .await?
             }
             Listing::Tab(tab) => {
+                let _turn = self.tab_turn.lock().await;
                 // Only the hot tab names each topic's node, in a title prefix.
                 let (path, kind) = if tab.eq_ignore_ascii_case("hot") {
                     ("/feed/tab/hot.xml".to_string(), FeedKind::Prefixed)
@@ -300,6 +304,7 @@ impl ClientBuilder {
         Ok(Client {
             transport: Transport::new(&self.settings)?,
             restricted_ids: Arc::default(),
+            tab_turn: Arc::default(),
         })
     }
 }
