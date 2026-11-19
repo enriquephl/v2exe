@@ -945,11 +945,17 @@ mod tests {
         assert_eq!(segs[0].tone, Tone::Alert);
         assert!(segs[0].text.contains("13:00"), "{}", segs[0].text);
 
-        // Once the recovery time has passed, the old numbers no longer hold.
-        let later = quota(600, 0).reset + Duration::minutes(1);
-        let segs = app.right_segments(later);
-        assert_eq!(segs[0].text, "API");
-        assert_eq!(segs[0].tone, Tone::Ok);
+        // The used-up form holds until the recovery time; from then on the old numbers no
+        // longer hold.
+        let reset = quota(600, 0).reset;
+        let segs = app.right_segments(reset - Duration::seconds(1));
+        assert_eq!(segs[0].tone, Tone::Alert);
+        assert!(segs[0].text.contains("13:00"), "{}", segs[0].text);
+        for later in [reset, reset + Duration::minutes(1)] {
+            let segs = app.right_segments(later);
+            assert_eq!(segs[0].text, "API", "{later}");
+            assert_eq!(segs[0].tone, Tone::Ok, "{later}");
+        }
 
         app.quota = Some(quota(600, 571));
         app.error = Some("网络错误：连接超时".into());
