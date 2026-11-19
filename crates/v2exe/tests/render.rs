@@ -85,6 +85,34 @@ fn display_width_counts_wide_chars() {
 }
 
 #[test]
+fn variation_selector_makes_a_narrow_emoji_two_columns() {
+    assert_eq!(display_width("❤\u{fe0f}"), 2);
+    assert_eq!(display_width("a\u{fe0f}"), 2);
+    assert_eq!(display_width("中\u{fe0f}"), 2);
+    assert_eq!(display_width("\u{fe0f}"), 0);
+    assert_eq!(
+        texts(&wrap(&render_html("❤\u{fe0f}❤\u{fe0f}"), 2)),
+        vec!["❤\u{fe0f}", "❤\u{fe0f}"]
+    );
+    assert_eq!(
+        texts(&wrap(&render_html("ab❤\u{fe0f}"), 3)),
+        vec!["ab", "❤\u{fe0f}"]
+    );
+}
+
+#[test]
+fn wrap_breaks_after_a_narrow_emoji_like_after_a_wide_one() {
+    assert_eq!(
+        texts(&wrap(&render_html("😀节abc"), 5)),
+        vec!["😀", "节abc"]
+    );
+    assert_eq!(
+        texts(&wrap(&render_html("❤\u{fe0f}节abc"), 5)),
+        vec!["❤\u{fe0f}", "节abc"]
+    );
+}
+
+#[test]
 fn wrap_cjk() {
     assert_eq!(
         texts(&wrap(&render_html("一二三四五"), 6)),
