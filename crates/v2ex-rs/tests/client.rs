@@ -113,6 +113,61 @@ async fn restricted_node_listing_is_refused_without_request() {
 }
 
 #[tokio::test]
+async fn restricted_names_match_ignoring_case_without_request() {
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+
+    let listing = client.topics(&Listing::Node("NSFW".into()), 1).await;
+    assert!(matches!(listing, Err(Error::Restricted { node }) if node == "NSFW"));
+    let node = client.node("FLAMEWAR").await;
+    assert!(matches!(node, Err(Error::Restricted { node }) if node == "FLAMEWAR"));
+    let node = client.node("Sandbox").await;
+    assert!(matches!(node, Err(Error::Restricted { node }) if node == "Sandbox"));
+}
+
+#[tokio::test]
+async fn names_are_percent_encoded_as_query_values() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/nodes/show.json"))
+        .and(query_param("name", "a&b#c"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(NODE))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server).node("a&b#c").await.unwrap();
+}
+
+#[tokio::test]
+async fn names_are_percent_encoded_as_path_segments() {
+    let server = MockServer::start().await;
+    let client = client(&server);
+    let name = "a/b?c#d&e";
+
+    let _ = client.topics(&Listing::Node(name.into()), 1).await;
+    let _ = client.topics(&Listing::Tab(name.into()), 1).await;
+
+    let requests = server.received_requests().await.unwrap();
+    let targets: Vec<_> = requests
+        .iter()
+        .map(|r| (r.url.path(), r.url.query()))
+        .collect();
+    assert_eq!(
+        targets,
+        vec![
+            ("/feed/a%2Fb%3Fc%23d%26e.xml", None),
+            ("/feed/tab/a%2Fb%3Fc%23d%26e.xml", None),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn hot_tab_drops_restricted_titles() {
     let server = MockServer::start().await;
     serve("/feed/tab/hot.xml", &[], TAB_HOT_FEED)

@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, PercentEncode, utf8_percent_encode};
+
 use crate::feed::{self, FeedKind};
 use crate::http::{Endpoint, Settings, Transport};
 use crate::restricted::{self, IdSource};
@@ -16,6 +18,12 @@ const REPLIES_TTL: Duration = Duration::from_secs(60);
 const NODE_TTL: Duration = Duration::from_secs(3600);
 const NODES_TTL: Duration = Duration::from_secs(7200);
 const RESTRICTED_IDS_TTL: Duration = Duration::from_secs(600);
+
+const NAME_ESCAPES: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 /// Cheap to clone; clones share one connection pool, cache and quota record.
 #[derive(Clone)]
@@ -97,7 +105,7 @@ impl Client {
         if restricted::by_name(name).is_some() {
             return Err(restricted_error(name));
         }
-        let path = format!("/api/nodes/show.json?name={name}");
+        let path = format!("/api/nodes/show.json?name={}", encode(name));
         let body = self.transport.get(&path, Endpoint::Api, NODE_TTL).await?;
         api1::parse_node(&body)
     }
@@ -130,12 +138,12 @@ impl Client {
                 self.api_topics("/api/topics/latest.json", TOPICS_TTL)
                     .await?
             }
-            Listing::Tab(tab) if tab == "hot" => {
+            Listing::Tab(tab) if tab.eq_ignore_ascii_case("hot") => {
                 self.feed_topics("/feed/tab/hot.xml", &FeedKind::Prefixed, TOPICS_TTL)
                     .await?
             }
             Listing::Tab(tab) => {
-                let path = format!("/feed/tab/{tab}.xml");
+                let path = format!("/feed/tab/{}.xml", encode(tab));
                 let mut topics = self
                     .feed_topics(&path, &FeedKind::Plain, TOPICS_TTL)
                     .await?;
@@ -147,9 +155,7 @@ impl Client {
                 if restricted::by_name(name).is_some() {
                     return Err(restricted_error(name));
                 }
-                let path = format!("/feed/{name}.xml");
-                self.feed_topics(&path, &FeedKind::Node(name.clone()), TOPICS_TTL)
-                    .await?
+                self.node_feed(name, TOPICS_TTL).await?
             }
         };
         // Hot, latest and the hot tab name each topic's node; the other listings carry none that
@@ -164,20 +170,22 @@ impl Client {
         for node in restricted::RESTRICTED {
             let topics = match node.source {
                 IdSource::Api => {
-                    let path = format!("/api/topics/show.json?node_name={}", node.name);
+                    let path = format!("/api/topics/show.json?node_name={}", encode(node.name));
                     self.api_topics(&path, RESTRICTED_IDS_TTL).await
                 }
-                IdSource::Feed => {
-                    let path = format!("/feed/{}.xml", node.name);
-                    let kind = FeedKind::Node(node.name.to_string());
-                    self.feed_topics(&path, &kind, RESTRICTED_IDS_TTL).await
-                }
+                IdSource::Feed => self.node_feed(node.name, RESTRICTED_IDS_TTL).await,
             };
             if let Ok(topics) = topics {
                 ids.extend(topics.iter().map(|t| t.id));
             }
         }
         ids
+    }
+
+    async fn node_feed(&self, name: &str, ttl: Duration) -> Result<Vec<Topic>> {
+        let path = format!("/feed/{}.xml", encode(name));
+        self.feed_topics(&path, &FeedKind::Node(name.to_string()), ttl)
+            .await
     }
 
     async fn api_topics(&self, path: &str, ttl: Duration) -> Result<Vec<Topic>> {
@@ -222,6 +230,12 @@ impl ClientBuilder {
             transport: Transport::new(&self.settings)?,
         })
     }
+}
+
+/// Escapes everything but the RFC 3986 unreserved characters, so a name stays inside the path
+/// segment or query value it is placed in.
+fn encode(name: &str) -> PercentEncode<'_> {
+    utf8_percent_encode(name, NAME_ESCAPES)
 }
 
 fn restricted_error(node: &str) -> Error {

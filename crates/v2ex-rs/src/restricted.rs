@@ -34,15 +34,48 @@ pub(crate) const RESTRICTED: &[RestrictedNode] = &[
     },
 ];
 
+/// Matches ignoring ASCII case: the API resolves node names case-insensitively.
 pub(crate) fn by_name(name: &str) -> Option<&'static RestrictedNode> {
-    RESTRICTED.iter().find(|r| r.name == name)
+    RESTRICTED
+        .iter()
+        .find(|r| r.name.eq_ignore_ascii_case(name))
 }
 
-/// The restricted node a topic's node reference points at. A reference with a name is matched by
-/// name; one with only a title (tab and hot feeds) is matched by title.
+/// The restricted node a topic's node reference points at, matching ignoring ASCII case. A
+/// reference with a name is matched by name; one with only a title (tab and hot feeds) is
+/// matched by title.
 pub(crate) fn of(node: &NodeRef) -> Option<&'static RestrictedNode> {
     match node.name.as_deref() {
         Some(name) => by_name(name),
-        None => RESTRICTED.iter().find(|r| r.title == node.title),
+        None => RESTRICTED
+            .iter()
+            .find(|r| r.title.eq_ignore_ascii_case(&node.title)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::of;
+    use crate::NodeRef;
+
+    fn node(name: Option<&str>, title: &str) -> NodeRef {
+        NodeRef {
+            name: name.map(str::to_string),
+            title: title.to_string(),
+        }
+    }
+
+    #[test]
+    fn matches_by_name_ignoring_case() {
+        let found = of(&node(Some("FlameWar"), "x"));
+        assert_eq!(found.map(|r| r.name), Some("flamewar"));
+        assert!(of(&node(Some("python"), "NSFW")).is_none());
+    }
+
+    #[test]
+    fn matches_by_title_when_there_is_no_name() {
+        assert_eq!(of(&node(None, "nsfw")).map(|r| r.name), Some("nsfw"));
+        assert_eq!(of(&node(None, "沙盒")).map(|r| r.name), Some("sandbox"));
+        assert!(of(&node(None, "Python")).is_none());
     }
 }

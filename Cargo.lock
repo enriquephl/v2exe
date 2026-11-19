@@ -1624,6 +1624,7 @@ dependencies = [
  "bytes",
  "chrono",
  "feed-rs",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
